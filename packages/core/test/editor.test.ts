@@ -1,4 +1,5 @@
 import type { Root } from "mdast";
+import { EditorView } from "@codemirror/view";
 import type { Plugin } from "unified";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEditor } from "../src/index";
@@ -14,6 +15,17 @@ describe("createEditor", () => {
 
     expect(editor.getDocument()).toBe("# Hello");
     editor.destroy();
+  });
+
+  it("mounts into the provided container and removes editor dom on destroy", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({ container, initialValue: "# Hello" });
+
+    expect(container.querySelector(".cm-editor")).not.toBeNull();
+
+    editor.destroy();
+
+    expect(container.querySelector(".cm-editor")).toBeNull();
   });
 
   it("emits change, focus, and blur hooks with canonical document values", () => {
@@ -270,5 +282,36 @@ describe("createEditor", () => {
 
     expect(docs).toEqual([]);
     expect(events).toEqual([]);
+  });
+
+  it("composes cm extension contributions with built-in editor behavior", () => {
+    const container = document.createElement("div");
+    const seenDocs: string[] = [];
+    const editor = createEditor({
+      container,
+      plugins: [
+        {
+          name: "editor-attributes",
+          cmExtensions: [EditorView.editorAttributes.of({ "data-plugin": "yes" })]
+        },
+        {
+          name: "update-listener",
+          cmExtensions: [
+            EditorView.updateListener.of((update) => {
+              if (update.docChanged) {
+                seenDocs.push(update.state.doc.toString());
+              }
+            })
+          ]
+        }
+      ]
+    });
+
+    editor.setDocument("from-extension");
+
+    expect(container.querySelector(".cm-editor")?.getAttribute("data-plugin")).toBe("yes");
+    expect(seenDocs).toEqual(["from-extension"]);
+    expect(editor.getDocument()).toBe("from-extension");
+    editor.destroy();
   });
 });
