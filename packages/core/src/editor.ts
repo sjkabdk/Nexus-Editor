@@ -4,8 +4,11 @@ import type { Root } from "mdast";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 
+import { EventEmitter } from "./event-emitter";
 import { createLivePreviewExtension } from "./live-preview";
-import type { EditorAPI, EditorConfig, NexusPlugin, ParserLike } from "./types";
+import { computeSlashState } from "./slash-state";
+import type { EditorAPI, EditorConfig, EditorEventMap, NexusPlugin, ParserLike } from "./types";
+import { createWidgetExtension } from "./widget-extension";
 
 function createEmptyAst(): Root {
   return {
@@ -45,7 +48,9 @@ export function createEditor(config: EditorConfig): EditorAPI {
   const shortcuts = plugins.flatMap((plugin) => plugin.shortcuts ?? []);
   const slashCommands = plugins.flatMap((plugin) => plugin.slashCommands ?? []);
   const cmExtensions = plugins.flatMap((plugin) => plugin.cmExtensions ?? []);
+  const widgetDefs = plugins.flatMap((plugin) => plugin.widgets ?? []);
   const parseDelayMs = config.parseDelayMs ?? 0;
+  const emitter = new EventEmitter<EditorEventMap>();
   let destroyed = false;
   let focused = false;
   let parseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -61,10 +66,12 @@ export function createEditor(config: EditorConfig): EditorAPI {
 
     if (next) {
       config.onFocus?.();
+      emitter.emit("focus");
       return;
     }
 
     config.onBlur?.();
+    emitter.emit("blur");
   }
 
   function emitChange(markdown: string) {
@@ -74,6 +81,7 @@ export function createEditor(config: EditorConfig): EditorAPI {
 
     currentAst = parseDocument(parser, markdown);
     config.onChange?.(markdown, currentAst);
+    emitter.emit("change", markdown, currentAst);
   }
 
   function scheduleChange(markdown: string) {
@@ -124,8 +132,34 @@ export function createEditor(config: EditorConfig): EditorAPI {
           if (update.docChanged) {
             scheduleChange(update.state.doc.toString());
           }
+
+          if ((update.selectionSet || update.docChanged) && !destroyed) {
+            const sel = update.state.selection.main;
+
+            if (update.selectionSet) {
+              emitter.emit("selectionChange", { anchor: sel.anchor, head: sel.head });
+            }
+
+            if (slashCommands.length > 0) {
+              const doc = update.state.doc.toString();
+              const state = computeSlashState(doc, sel.head, slashCommands);
+              let coords: { left: number; top: number; bottom: number } | null = null;
+
+              if (state.isOpen && state.from !== null) {
+                try {
+                  const raw = update.view.coordsAtPos(state.from);
+                  if (raw) {
+                    coords = { left: raw.left, top: raw.top, bottom: raw.bottom };
+                  }
+                } catch { /* out of range */ }
+              }
+
+              emitter.emit("slashMenuChange", { ...state, coords });
+            }
+          }
         }),
         ...createLivePreviewExtension(parser, config.livePreview),
+        ...createWidgetExtension(parser, widgetDefs),
         ...shortcutExtensions,
         ...cmExtensions
       ]
@@ -195,6 +229,20 @@ export function createEditor(config: EditorConfig): EditorAPI {
       const shortcut = shortcuts.find((entry) => entry.key === key);
       return shortcut ? shortcut.run(api) : false;
     },
+    on(event, handler) {
+      emitter.on(event, handler);
+    },
+    off(event, handler) {
+      emitter.off(event, handler);
+    },
+    getCoordsAtPos(pos) {
+      if (destroyed) return null;
+      try {
+        return view.coordsAtPos(pos);
+      } catch {
+        return null;
+      }
+    },
     destroy() {
       destroyed = true;
       focused = false;
@@ -202,6 +250,7 @@ export function createEditor(config: EditorConfig): EditorAPI {
         clearTimeout(parseTimer);
         parseTimer = undefined;
       }
+      emitter.clear();
       view.destroy();
     }
   };

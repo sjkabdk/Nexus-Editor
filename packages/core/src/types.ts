@@ -44,6 +44,23 @@ export interface EditorConfig {
   onAssetUpload?: (file: File) => Promise<string>;
 }
 
+export interface SlashMenuState {
+  isOpen: boolean;
+  from: number | null;
+  to: number | null;
+  query: string;
+  commands: SlashCommandDef[];
+  coords: { left: number; top: number; bottom: number } | null;
+}
+
+export interface EditorEventMap {
+  change: (doc: string, ast: Root) => void;
+  focus: () => void;
+  blur: () => void;
+  selectionChange: (selection: { anchor: number; head: number }) => void;
+  slashMenuChange: (state: SlashMenuState) => void;
+}
+
 export interface EditorAPI {
   getDocument(): string;
   getAst(): Root;
@@ -55,6 +72,9 @@ export interface EditorAPI {
   blur(): void;
   runShortcut(key: string): boolean;
   destroy(): void;
+  on<K extends keyof EditorEventMap>(event: K, handler: EditorEventMap[K]): void;
+  off<K extends keyof EditorEventMap>(event: K, handler: EditorEventMap[K]): void;
+  getCoordsAtPos(pos: number): { left: number; right: number; top: number; bottom: number } | null;
 }
 
 export interface SlashCommandDef {
@@ -63,10 +83,18 @@ export interface SlashCommandDef {
   keywords?: string[];
 }
 
+export interface WidgetDefinition {
+  nodeType: string;
+  match?: (node: any) => boolean;
+  render: (node: any, source: string) => HTMLElement;
+  destroy?: (element: HTMLElement) => void;
+}
+
 export interface NexusPlugin {
   name: string;
   shortcuts?: Array<{ key: string; run: (editor: EditorAPI) => boolean }>;
   slashCommands?: SlashCommandDef[];
   remarkPlugins?: Array<Plugin<[], Root, Root>>;
   cmExtensions?: Extension[];
+  widgets?: WidgetDefinition[];
 }

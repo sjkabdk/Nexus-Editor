@@ -2,6 +2,7 @@ export { createEditor } from "./editor";
 export type {
   EditorAPI,
   EditorConfig,
+  EditorEventMap,
   LivePreviewConfig,
   LivePreviewNode,
   LivePreviewNodeType,
@@ -9,5 +10,7 @@ export type {
   LivePreviewRenderer,
   NexusPlugin,
   SlashCommandDef,
-  ParserLike
+  SlashMenuState,
+  ParserLike,
+  WidgetDefinition
 } from "./types";
