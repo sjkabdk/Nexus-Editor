@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createSlashPlugin,
   filterSlashCommands,
+  getSlashState,
   getSlashMatch
 } from "../src/index";
 
@@ -40,5 +41,31 @@ describe("@nexus/plugin-slash", () => {
 
     expect(plugin.name).toBe("plugin-slash");
     expect("slashCommands" in plugin ? plugin.slashCommands : undefined).toEqual(commands);
+  });
+
+  it("derives slash menu state with filtered commands", () => {
+    const commands = [
+      { id: "heading", title: "Heading", keywords: ["title"] },
+      { id: "table", title: "Table", keywords: ["grid"] }
+    ];
+    const doc = "/tit";
+
+    expect(getSlashState(doc, doc.length, commands)).toEqual({
+      isOpen: true,
+      from: 0,
+      to: 4,
+      query: "tit",
+      commands: [{ id: "heading", title: "Heading", keywords: ["title"] }]
+    });
+  });
+
+  it("returns a closed slash menu state when no slash query is active", () => {
+    expect(getSlashState("plain text", 10, [{ id: "heading", title: "Heading" }])).toEqual({
+      isOpen: false,
+      from: null,
+      to: null,
+      query: "",
+      commands: []
+    });
   });
 });

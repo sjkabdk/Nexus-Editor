@@ -6,6 +6,14 @@ export interface SlashMatch {
   query: string;
 }
 
+export interface SlashState {
+  isOpen: boolean;
+  from: number | null;
+  to: number | null;
+  query: string;
+  commands: SlashCommandDef[];
+}
+
 export interface SlashPlugin extends NexusPlugin {
   slashCommands: SlashCommandDef[];
 }
@@ -56,6 +64,32 @@ export function filterSlashCommands(
 
     return haystacks.some((value) => value.includes(normalizedQuery));
   });
+}
+
+export function getSlashState(
+  doc: string,
+  cursor: number,
+  commands: SlashCommandDef[]
+): SlashState {
+  const match = getSlashMatch(doc, cursor);
+
+  if (!match) {
+    return {
+      isOpen: false,
+      from: null,
+      to: null,
+      query: "",
+      commands: []
+    };
+  }
+
+  return {
+    isOpen: true,
+    from: match.from,
+    to: match.to,
+    query: match.query,
+    commands: filterSlashCommands(commands, match.query)
+  };
 }
 
 export function createSlashPlugin(commands: SlashCommandDef[]): SlashPlugin {
