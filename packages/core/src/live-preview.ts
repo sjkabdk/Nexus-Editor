@@ -1,5 +1,5 @@
-import { type Extension, type Range, type SelectionRange } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
+import { StateField, type Extension, type Range, type SelectionRange, type Transaction } from "@codemirror/state";
+import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
 import type { Heading, Root } from "mdast";
 
 import { collectLivePreviewRanges, selectionIntersects } from "./live-preview-ranges";
@@ -66,6 +66,8 @@ function createWidget(element: HTMLElement): WidgetType {
   })();
 }
 
+const BLOCK_NODE_TYPES = new Set(["blockquote", "code", "table", "thematicBreak"]);
+
 const HEADING_FONT_SIZE: Record<number, string> = {
   1: "1.6em",
   2: "1.4em",
@@ -88,18 +90,15 @@ function buildHeadingDecorations(
     const cursorOnHeading = selectionIntersects(range.from, range.to, selection);
 
     if (cursorOnHeading) {
-      // Cursor on heading: show # prefix dimmed, same size as heading text
       decos.push(
         Decoration.mark({
           attributes: { style: `font-weight: bold; font-size: ${fontSize}; color: #aaa` }
         }).range(range.from, textStart)
       );
     } else {
-      // Cursor away: hide # prefix
       decos.push(Decoration.replace({}).range(range.from, textStart));
     }
 
-    // Text is always bold + sized regardless of cursor position
     decos.push(
       Decoration.mark({
         attributes: {
@@ -112,7 +111,8 @@ function buildHeadingDecorations(
 }
 
 function buildDecorations(
-  view: EditorView,
+  doc: string,
+  selection: readonly SelectionRange[],
   parser: ParserLike,
   config: NormalizedLivePreviewConfig
 ): DecorationSet {
@@ -120,15 +120,13 @@ function buildDecorations(
     return Decoration.none;
   }
 
-  const doc = view.state.doc.toString();
   const ast = parseDocument(parser, doc);
-  const ranges = collectLivePreviewRanges(ast, doc, view.state.selection.ranges);
+  const ranges = collectLivePreviewRanges(ast, doc, selection);
   const decos: Range<Decoration>[] = [];
 
   const headingSpans: [number, number][] = [];
 
   for (const range of ranges) {
-    // When a heading uses widget-replace (custom renderer), skip child ranges inside it
     if (headingSpans.some(([from, to]) => range.from >= from && range.to <= to)) {
       continue;
     }
@@ -136,16 +134,19 @@ function buildDecorations(
     if (range.node.type === "heading" && !config.renderers.heading) {
       buildHeadingDecorations(
         range as { from: number; to: number; node: Heading },
-        view.state.selection.ranges,
+        selection,
         decos
       );
     } else {
       if (range.node.type === "heading") {
         headingSpans.push([range.from, range.to]);
       }
+
+      const isBlock = BLOCK_NODE_TYPES.has(range.node.type);
       decos.push(
         Decoration.replace({
-          widget: createWidget(renderLivePreviewNode(range.node, range.source, config.renderers))
+          widget: createWidget(renderLivePreviewNode(range.node, range.source, config.renderers)),
+          block: isBlock
         }).range(range.from, range.to)
       );
     }
@@ -164,24 +165,30 @@ export function createLivePreviewExtension(
     return [];
   }
 
-  const plugin = ViewPlugin.fromClass(
-    class {
-      decorations;
-
-      constructor(view: EditorView) {
-        this.decorations = buildDecorations(view, parser, normalized);
-      }
-
-      update(update: { docChanged: boolean; selectionSet: boolean; view: EditorView }) {
-        if (update.docChanged || update.selectionSet) {
-          this.decorations = buildDecorations(update.view, parser, normalized);
-        }
-      }
+  const field = StateField.define<DecorationSet>({
+    create(state) {
+      return buildDecorations(
+        state.doc.toString(),
+        state.selection.ranges,
+        parser,
+        normalized
+      );
     },
-    {
-      decorations: (value) => value.decorations
+    update(decos: DecorationSet, tr: Transaction) {
+      if (tr.docChanged || tr.selection) {
+        return buildDecorations(
+          tr.state.doc.toString(),
+          tr.state.selection.ranges,
+          parser,
+          normalized
+        );
+      }
+      return decos;
+    },
+    provide(field) {
+      return EditorView.decorations.from(field);
     }
-  );
+  });
 
-  return [plugin];
+  return [field];
 }

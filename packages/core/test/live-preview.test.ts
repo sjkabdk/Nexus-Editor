@@ -77,6 +77,38 @@ describe("live preview", () => {
     editor.destroy();
   });
 
+  it("renders fenced code blocks as pre/code elements", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      initialValue: "Text\n\n```js\nconsole.log(1)\n```",
+      livePreview: true
+    });
+
+    const pre = container.querySelector("pre");
+    expect(pre).not.toBeNull();
+    const code = pre?.querySelector("code");
+    expect(code?.textContent).toBe("console.log(1)");
+    expect(code?.getAttribute("data-language")).toBe("js");
+    editor.destroy();
+  });
+
+  it("renders tables as table elements with GFM", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      initialValue: "Text\n\n| A | B |\n| --- | --- |\n| 1 | 2 |",
+      livePreview: true,
+      plugins: [createGfmPreset()]
+    });
+
+    const table = container.querySelector("table");
+    expect(table).not.toBeNull();
+    expect(table?.querySelector("th")?.textContent).toBe("A");
+    expect(table?.querySelector("td")?.textContent).toBe("1");
+    editor.destroy();
+  });
+
   it("allows host renderers to override default node rendering", () => {
     const container = document.createElement("div");
     const editor = createEditor({

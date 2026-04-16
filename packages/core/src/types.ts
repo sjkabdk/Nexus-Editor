@@ -1,5 +1,5 @@
 import type { Extension } from "@codemirror/state";
-import type { Blockquote, Delete, Heading, Image, InlineCode, Link, Root, Strong, Emphasis, ThematicBreak } from "mdast";
+import type { Blockquote, Code, Delete, Heading, Image, InlineCode, Link, Root, Strong, Emphasis, Table, ThematicBreak } from "mdast";
 import type { Plugin } from "unified";
 
 export interface ParserLike {
@@ -8,6 +8,7 @@ export interface ParserLike {
 
 export type LivePreviewNode =
   | Blockquote
+  | Code
   | Delete
   | Emphasis
   | Heading
@@ -15,6 +16,7 @@ export type LivePreviewNode =
   | InlineCode
   | Link
   | Strong
+  | Table
   | ThematicBreak;
 
 export type LivePreviewNodeType = LivePreviewNode["type"];
