@@ -168,34 +168,42 @@ export class EditableTableWidget extends WidgetType {
     const colCount = ("children" in rows[0] && Array.isArray(rows[0].children))
       ? rows[0].children.length : 0;
 
+    // Shared drag state scoped to this table instance
+    let dragColIdx = -1;
+    let dragRowIdx = -1;
+
     // Column grip row (drag handles above each column)
     const gripRow = document.createElement("tr");
-    gripRow.className = "nexus-table-grip-row";
-    let dragColIdx = -1;
+    // Empty cell for row-grip column
+    const gripCorner = document.createElement("td");
+    gripCorner.style.cssText = "border:none;padding:0;width:20px;";
+    gripRow.appendChild(gripCorner);
 
     for (let c = 0; c < colCount; c++) {
       const gripTd = document.createElement("td");
       gripTd.style.cssText =
-        "padding:0 10px;text-align:center;border:none;cursor:grab;" +
+        "padding:2px 10px;text-align:center;border:none;cursor:grab;" +
         "color:#ccc;font-size:12px;user-select:none;height:18px;";
       gripTd.textContent = "⋮⋮";
       gripTd.draggable = true;
-      gripTd.title = "Drag to reorder";
+      gripTd.title = "Drag to reorder column";
 
       gripTd.addEventListener("dragstart", (e) => {
         dragColIdx = c;
+        dragRowIdx = -1;
         e.dataTransfer!.effectAllowed = "move";
+        e.dataTransfer!.setData("text/plain", "col");
       });
-      gripTd.addEventListener("dragover", (e) => { e.preventDefault(); });
+      gripTd.addEventListener("dragover", (e) => {
+        if (dragColIdx >= 0) { e.preventDefault(); gripTd.style.background = "#e8f0fe"; }
+      });
+      gripTd.addEventListener("dragleave", () => { gripTd.style.background = ""; });
       gripTd.addEventListener("drop", (e) => {
         e.preventDefault();
-        if (dragColIdx >= 0 && dragColIdx !== c) {
-          self.moveColumn(dragColIdx, c);
-        }
+        gripTd.style.background = "";
+        if (dragColIdx >= 0 && dragColIdx !== c) self.moveColumn(dragColIdx, c);
         dragColIdx = -1;
       });
-
-      // Right-click → delete column
       gripTd.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         if (colCount > 1) self.deleteColumn(c);
@@ -214,32 +222,47 @@ export class EditableTableWidget extends WidgetType {
       const sourceLineIdx = dataLineIndices[rowIdx];
       const currentRowIdx = rowIdx;
 
-      // Row drag handle as first visual indicator
-      tr.draggable = true;
-      tr.style.cursor = "default";
+      // Row grip cell (left side of each row)
+      const rowGrip = document.createElement("td");
+      rowGrip.style.cssText =
+        "padding:2px 4px;text-align:center;border:none;cursor:grab;" +
+        "color:#ccc;font-size:12px;user-select:none;width:20px;";
+      rowGrip.textContent = "⋮⋮";
+      rowGrip.draggable = true;
+      rowGrip.title = "Drag to reorder row";
 
-      let dragRowIdx = -1;
-      tr.addEventListener("dragstart", (e) => {
+      rowGrip.addEventListener("dragstart", (e) => {
         dragRowIdx = currentRowIdx;
+        dragColIdx = -1;
         e.dataTransfer!.effectAllowed = "move";
+        e.dataTransfer!.setData("text/plain", "row");
         tr.style.opacity = "0.5";
       });
-      tr.addEventListener("dragend", () => { tr.style.opacity = "1"; });
-      tr.addEventListener("dragover", (e) => { e.preventDefault(); });
+      rowGrip.addEventListener("dragend", () => { tr.style.opacity = "1"; });
+
+      // Drop target: the entire row accepts row drops
+      tr.addEventListener("dragover", (e) => {
+        if (dragRowIdx >= 0) { e.preventDefault(); tr.style.background = "#e8f0fe"; }
+      });
+      tr.addEventListener("dragleave", () => { tr.style.background = ""; });
       tr.addEventListener("drop", (e) => {
         e.preventDefault();
+        tr.style.background = "";
         if (dragRowIdx >= 0 && dragRowIdx !== currentRowIdx) {
           self.moveRow(dragRowIdx, currentRowIdx);
         }
+        dragRowIdx = -1;
       });
 
-      // Right-click on row → delete row
       tr.addEventListener("contextmenu", (e) => {
-        if (rows.length > 2) { // keep at least header + 1 data row
+        // Only trigger on the grip cell, not content cells
+        if (e.target === rowGrip && rows.length > 2) {
           e.preventDefault();
           self.deleteRow(currentRowIdx);
         }
       });
+
+      tr.appendChild(rowGrip);
 
       for (let colIdx = 0; colIdx < astCells.length; colIdx++) {
         const td = document.createElement(isHeader ? "th" : "td");
