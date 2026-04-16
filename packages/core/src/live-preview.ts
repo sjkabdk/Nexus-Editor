@@ -148,14 +148,39 @@ class EditableTableWidget extends WidgetType {
     return true;
   }
 
+  private addColumn(): void {
+    const v = this.viewRef.current;
+    if (!v) return;
+    const lines = this.source.split("\n");
+    const newLines = lines.map((line) => {
+      if (SEPARATOR_RE.test(line)) return line.replace(/\|?\s*$/, " | --- |");
+      return line.replace(/\|?\s*$/, " |  |");
+    });
+    const tableEnd = this.tableFrom + this.source.length;
+    v.dispatch({ changes: { from: this.tableFrom, to: tableEnd, insert: newLines.join("\n") } });
+  }
+
+  private addRow(): void {
+    const v = this.viewRef.current;
+    if (!v) return;
+    const colCount = (this.node.children?.[0] as any)?.children?.length ?? 2;
+    const cells = Array(colCount).fill("  ");
+    const newRow = "\n| " + cells.join(" | ") + " |";
+    const tableEnd = this.tableFrom + this.source.length;
+    v.dispatch({ changes: { from: tableEnd, insert: newRow } });
+  }
+
   toDOM(): HTMLElement {
+    const wrapper = document.createElement("div");
+    wrapper.style.display = "inline-block";
+    wrapper.style.position = "relative";
+
     const table = document.createElement("table");
     table.style.borderCollapse = "collapse";
-    table.style.width = "100%";
     table.style.display = "table";
 
     const rows = this.node.children ?? [];
-    if (rows.length === 0) return table;
+    if (rows.length === 0) return wrapper;
 
     const sourceLines = this.source.split("\n");
     const dataLineIndices: number[] = [];
@@ -230,7 +255,33 @@ class EditableTableWidget extends WidgetType {
       rowIdx++;
     }
 
-    return table;
+    wrapper.appendChild(table);
+
+    // "+" button on the right — add column
+    const addColBtn = document.createElement("button");
+    addColBtn.textContent = "+";
+    addColBtn.title = "在右侧新增列";
+    addColBtn.style.cssText =
+      "position:absolute;right:-24px;top:50%;transform:translateY(-50%);" +
+      "width:20px;height:20px;border:1px solid #ddd;border-radius:50%;" +
+      "background:#fff;cursor:pointer;font-size:14px;line-height:1;" +
+      "display:flex;align-items:center;justify-content:center;color:#999;padding:0;";
+    addColBtn.addEventListener("click", () => self.addColumn());
+    wrapper.appendChild(addColBtn);
+
+    // "+" button at the bottom — add row
+    const addRowBtn = document.createElement("button");
+    addRowBtn.textContent = "+";
+    addRowBtn.title = "在下方新增行";
+    addRowBtn.style.cssText =
+      "display:flex;align-items:center;justify-content:center;" +
+      "width:20px;height:20px;border:1px solid #ddd;border-radius:50%;" +
+      "background:#fff;cursor:pointer;font-size:14px;line-height:1;" +
+      "color:#999;margin:4px auto 0;padding:0;";
+    addRowBtn.addEventListener("click", () => self.addRow());
+    wrapper.appendChild(addRowBtn);
+
+    return wrapper;
   }
 }
 
