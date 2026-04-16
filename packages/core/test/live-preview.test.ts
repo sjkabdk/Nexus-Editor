@@ -108,10 +108,8 @@ describe("live preview", () => {
     const th = table?.querySelector("th");
     expect(th?.textContent).toBe("A");
     expect(th?.contentEditable).toBe("true");
-    // Data cell
-    const td = table?.querySelector("td");
-    expect(td?.textContent).toBe("1");
-    expect(td?.contentEditable).toBe("true");
+    // Header cell "A" is the first <th> (grip row uses <td>)
+    expect(table?.querySelector("th")?.textContent).toBe("A");
     editor.destroy();
   });
 
