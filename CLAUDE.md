@@ -42,3 +42,5 @@ When modifying `packages/core/src/live-preview-table.ts`:
 7. **Test every change with ALL interaction paths:** click-to-edit, drag-to-select-range, grip-click-to-select-column, grip-drag-to-reorder, click-outside-to-deselect, delete-key-on-selection.
 
 8. **Any mouse interaction that spans multiple frames MUST set `self.editing = true` and increment `tableEditingCount`.** This prevents CM6 from recreating the widget DOM mid-interaction (via `eq()` returning true). Release in the mouseup handler. Without this, CM6 may destroy the DOM between mousedown and mousemove, leaving event listeners pointing at detached nodes.
+
+9. **Cell `blur` handlers MUST check for active grip drag before clearing `editing`.** When user clicks a grip while a cell is focused, the event order is: grip mousedown (sets editing=true) → cell blur (async, would clear editing=false). The blur handler must guard with `if (draggingCol < 0 && draggingRow < 0)` before decrementing. Without this guard, drag works only when no cell was previously focused.

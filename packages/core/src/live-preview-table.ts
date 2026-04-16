@@ -660,8 +660,13 @@ export class EditableTableWidget extends WidgetType {
 
         td.addEventListener("focus", () => { self.editing = true; tableEditingCount++; clearRangeSelection(); });
         td.addEventListener("blur", () => {
-          self.editing = false;
-          tableEditingCount--;
+          // Don't clear editing lock if a grip drag is active —
+          // grip mousedown sets editing=true, then cell blur fires async
+          // and would undo the lock, causing CM6 to recreate widget mid-drag
+          if (draggingCol < 0 && draggingRow < 0) {
+            self.editing = false;
+            tableEditingCount--;
+          }
           td.contentEditable = "false";
         });
 
