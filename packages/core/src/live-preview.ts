@@ -226,7 +226,8 @@ function buildCodeBlockDecorations(
 
     // Line style — only border-radius differs between first/last/middle
     const radius = isFirstLine ? "border-radius:4px 4px 0 0;" : isLastLine ? "border-radius:0 0 4px 4px;" : "";
-    const lineAttrs: Record<string, string> = { style: BASE + radius };
+    const relPos = isFirstLine && !cursorOnCode ? "position:relative;" : "";
+    const lineAttrs: Record<string, string> = { style: BASE + radius + relPos };
     if (isFirstLine) {
       lineAttrs.role = "code";
       if (lang) lineAttrs["aria-label"] = `Code block: ${lang}`;
@@ -254,9 +255,11 @@ function buildCodeBlockDecorations(
             const tag = document.createElement("span");
             tag.textContent = langText;
             tag.title = "Click to copy code";
-            tag.style.cssText = "margin-left:8px;font-size:12px;color:var(--nexus-text-muted,#888);" +
+            tag.style.cssText = "position:absolute;right:8px;top:0;" +
+              "font-size:12px;color:var(--nexus-text-muted,#888);" +
               "font-family:system-ui,-apple-system,sans-serif;cursor:pointer;user-select:none;" +
-              "padding:0 4px;border-radius:3px;transition:background 0.15s,color 0.15s;";
+              "padding:0 4px;border-radius:3px;transition:background 0.15s,color 0.15s;" +
+              "line-height:inherit;";
             tag.addEventListener("mouseenter", () => {
               tag.style.background = "var(--nexus-bg-muted,#e8e8e8)";
               tag.style.color = "var(--nexus-text,#24292e)";
