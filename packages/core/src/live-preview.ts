@@ -262,9 +262,7 @@ function buildCodeBlockDecorations(
               tag.style.background = "transparent";
               tag.style.color = "var(--nexus-text-muted,#888)";
             });
-            tag.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); });
-            tag.addEventListener("click", (e) => {
-              e.preventDefault(); e.stopPropagation();
+            tag.addEventListener("click", () => {
               navigator.clipboard.writeText(codeValue).then(() => {
                 const orig = tag.textContent;
                 tag.textContent = "Copied!";
