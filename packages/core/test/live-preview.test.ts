@@ -225,9 +225,9 @@ describe("live preview", () => {
     });
 
     expect(container.textContent).toContain("console.log(1)");
-    // Language label shown via data-lang attribute + CSS ::after
-    const langLine = container.querySelector("[data-lang]");
-    expect(langLine?.getAttribute("data-lang")).toBe("Js");
+    // Code block has role=code and aria-label with language
+    const codeLine = container.querySelector("[role='code']");
+    expect(codeLine?.getAttribute("aria-label")).toBe("Code block: js");
     editor.destroy();
   });
 

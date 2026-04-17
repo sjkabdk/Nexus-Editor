@@ -144,22 +144,6 @@ function themeToEditorTheme(theme: NexusTheme): Extension {
     "& .cm-content code, & .cm-content pre": {
       fontFamily: fontFamilyMono,
     },
-    // Code block language label via data attribute + ::after pseudo-element
-    "& .cm-line[data-lang]": {
-      position: "relative",
-    },
-    "& .cm-line[data-lang]::after": {
-      content: "attr(data-lang)",
-      position: "absolute",
-      right: "8px",
-      top: "0",
-      fontSize: "12px",
-      color: "var(--nexus-text-muted)",
-      fontFamily,
-      lineHeight: "inherit",
-      pointerEvents: "none",
-      userSelect: "none",
-    },
   });
 }
 

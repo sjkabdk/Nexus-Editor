@@ -230,7 +230,6 @@ function buildCodeBlockDecorations(
     if (isFirstLine) {
       lineAttrs.role = "code";
       if (lang) lineAttrs["aria-label"] = `Code block: ${lang}`;
-      if (langText) lineAttrs["data-lang"] = langText;
     }
     decos.push(Decoration.line({ attributes: lineAttrs }).range(lineStart));
 
