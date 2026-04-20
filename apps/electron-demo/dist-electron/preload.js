@@ -27,6 +27,9 @@ var vaultBridge = {
   read(filePath) {
     return import_electron.ipcRenderer.invoke("vault:read", filePath);
   },
+  readAll() {
+    return import_electron.ipcRenderer.invoke("vault:read-all");
+  },
   write(filePath, content) {
     return import_electron.ipcRenderer.invoke("vault:write", filePath, content);
   },

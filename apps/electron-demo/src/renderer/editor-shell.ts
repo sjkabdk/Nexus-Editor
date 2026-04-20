@@ -1,4 +1,4 @@
-import { createEditor, type EditorAPI } from "@nexus/core";
+import { createEditor, createWikilinksPlugin, type EditorAPI } from "@nexus/core";
 import { createGfmPreset } from "@nexus/preset-gfm";
 import { createHistoryPlugin } from "@nexus/plugin-history";
 import { createToolbarPlugin, createToolbarUI, type ToolbarUI } from "@nexus/plugin-toolbar";
@@ -11,6 +11,12 @@ export interface EditorShellOptions {
   state: AppState;
   settings: EditorSettings;
   onStateChange: () => void;
+  /** Called when the user clicks a wiki link. */
+  onWikilinkNavigate?(target: string, opts: { unresolved: boolean }): void;
+  /** Resolves a wiki-link name to an absolute target path; null = unresolved. */
+  resolveWikilink?(name: string): string | null;
+  /** Returns autocomplete candidates for the query after `[[`. */
+  suggestWikilinks?(query: string): string[];
 }
 
 export interface EditorShell {
@@ -22,12 +28,32 @@ export interface EditorShell {
 }
 
 export function createEditorShell(options: EditorShellOptions): EditorShell {
-  const { container, state, settings, onStateChange } = options;
+  const {
+    container,
+    state,
+    settings,
+    onStateChange,
+    onWikilinkNavigate,
+    resolveWikilink,
+    suggestWikilinks,
+  } = options;
+
+  const wikilinksPlugin = createWikilinksPlugin({
+    resolve: resolveWikilink ? (name) => resolveWikilink(name) : undefined,
+    onNavigate: onWikilinkNavigate,
+    suggest: suggestWikilinks ? (q) => suggestWikilinks(q) : undefined,
+  });
 
   const editor = createEditor({
     container,
     initialValue: state.content,
-    plugins: [createGfmPreset(), createHistoryPlugin(), createToolbarPlugin(), createSearchPlugin()],
+    plugins: [
+      createGfmPreset(),
+      createHistoryPlugin(),
+      createToolbarPlugin(),
+      createSearchPlugin(),
+      wikilinksPlugin,
+    ],
     livePreview: settings.livePreview,
     theme: settingsToTheme(settings),
     tabSize: settings.tabSize,
@@ -36,6 +62,11 @@ export function createEditorShell(options: EditorShellOptions): EditorShell {
     onChange(doc) {
       state.content = doc;
       state.dirty = true;
+      // Keep the link index in sync with the buffer so the backlinks panel
+      // reacts immediately when the user types `[[...]]`.
+      if (state.linkIndex && state.activeFile) {
+        state.linkIndex.updateFile(state.activeFile, doc);
+      }
       onStateChange();
     },
   });

@@ -4,6 +4,14 @@ export { markdownFold, markdownFoldService } from "./markdown-fold";
 export { markdownKeymap, handleMarkdownEnter } from "./markdown-keymap";
 export { enLocale, zhLocale, resolveLocale, type NexusLocale } from "./locale";
 export { lightTheme, darkTheme, type NexusTheme } from "./theme";
+export {
+  scanWikiLinks,
+  createWikilinksExtension,
+  createWikilinksPlugin,
+  type WikiLinkMatch,
+  type WikilinksOptions,
+  type WikiLinkNavigateOptions,
+} from "./wikilinks";
 export type {
   EditorAPI,
   EditorConfig,

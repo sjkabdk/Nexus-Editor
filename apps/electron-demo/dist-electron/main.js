@@ -205,6 +205,36 @@ import_electron.ipcMain.handle("vault:read", async (_event, filePath) => {
   const content = await (0, import_promises.readFile)(abs, "utf-8");
   return { path: abs, content };
 });
+async function collectFiles(dir, acc) {
+  const entries = await (0, import_promises.readdir)(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith(".")) continue;
+    if (SKIP_DIRS.has(entry.name)) continue;
+    const childPath = import_node_path.default.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await collectFiles(childPath, acc);
+      continue;
+    }
+    if (entry.isFile() && SUPPORTED_EXT.has(import_node_path.default.extname(entry.name).toLowerCase())) {
+      acc.push(childPath);
+    }
+  }
+}
+import_electron.ipcMain.handle("vault:read-all", async () => {
+  if (!activeVault) return [];
+  const paths = [];
+  await collectFiles(activeVault, paths);
+  const out = [];
+  for (const p of paths) {
+    const abs = assertInsideVault(p);
+    try {
+      const content = await (0, import_promises.readFile)(abs, "utf-8");
+      out.push({ path: abs, content });
+    } catch {
+    }
+  }
+  return out;
+});
 import_electron.ipcMain.handle("vault:write", async (_event, filePath, content) => {
   const abs = assertInsideVault(filePath);
   await (0, import_promises.writeFile)(abs, content, "utf-8");
@@ -213,10 +243,20 @@ import_electron.ipcMain.handle("vault:write", async (_event, filePath, content) 
 import_electron.ipcMain.handle(
   "vault:create-file",
   async (_event, parentDir, name) => {
-    const parent = assertInsideVault(parentDir);
-    const safeBase = name.trim() || "untitled";
-    const hasExt = SUPPORTED_EXT.has(import_node_path.default.extname(safeBase).toLowerCase());
-    const baseName = hasExt ? safeBase : `${safeBase}.md`;
+    const safeInput = name.trim() || "untitled";
+    const normInput = safeInput.replace(/\\/g, "/");
+    const segments = normInput.split("/").filter((s) => s.length > 0);
+    if (segments.length === 0) throw new Error("Invalid file name");
+    const baseNameRaw = segments.pop();
+    const subDirs = segments.join("/");
+    const parent = assertInsideVault(
+      subDirs ? import_node_path.default.join(parentDir, subDirs) : parentDir
+    );
+    if (subDirs) {
+      await (0, import_promises.mkdir)(parent, { recursive: true });
+    }
+    const hasExt = SUPPORTED_EXT.has(import_node_path.default.extname(baseNameRaw).toLowerCase());
+    const baseName = hasExt ? baseNameRaw : `${baseNameRaw}.md`;
     const ext = import_node_path.default.extname(baseName);
     const stem = baseName.slice(0, baseName.length - ext.length);
     let candidate = import_node_path.default.join(parent, baseName);

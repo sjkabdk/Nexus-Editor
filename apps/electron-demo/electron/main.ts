@@ -233,6 +233,41 @@ ipcMain.handle("vault:read", async (_event, filePath: string) => {
   return { path: abs, content };
 });
 
+// Bulk read every markdown file in the active vault — used to seed the
+// wiki-link index without N individual round-trips.
+async function collectFiles(dir: string, acc: string[]): Promise<void> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith(".")) continue;
+    if (SKIP_DIRS.has(entry.name)) continue;
+    const childPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await collectFiles(childPath, acc);
+      continue;
+    }
+    if (entry.isFile() && SUPPORTED_EXT.has(path.extname(entry.name).toLowerCase())) {
+      acc.push(childPath);
+    }
+  }
+}
+
+ipcMain.handle("vault:read-all", async () => {
+  if (!activeVault) return [];
+  const paths: string[] = [];
+  await collectFiles(activeVault, paths);
+  const out: { path: string; content: string }[] = [];
+  for (const p of paths) {
+    const abs = assertInsideVault(p);
+    try {
+      const content = await readFile(abs, "utf-8");
+      out.push({ path: abs, content });
+    } catch {
+      // Skip unreadable files rather than failing the whole batch.
+    }
+  }
+  return out;
+});
+
 ipcMain.handle("vault:write", async (_event, filePath: string, content: string) => {
   const abs = assertInsideVault(filePath);
   await writeFile(abs, content, "utf-8");
@@ -242,10 +277,26 @@ ipcMain.handle("vault:write", async (_event, filePath: string, content: string) 
 ipcMain.handle(
   "vault:create-file",
   async (_event, parentDir: string, name: string) => {
-    const parent = assertInsideVault(parentDir);
-    const safeBase = name.trim() || "untitled";
-    const hasExt = SUPPORTED_EXT.has(path.extname(safeBase).toLowerCase());
-    const baseName = hasExt ? safeBase : `${safeBase}.md`;
+    const safeInput = name.trim() || "untitled";
+    // Allow the caller to pass a subpath like `Folder/NewNote` — we split it
+    // into an extra parent path relative to `parentDir` and create any
+    // intermediate folders as needed. This is what the wiki-link
+    // create-on-click flow needs when the user types `[[Projects/X]]`.
+    const normInput = safeInput.replace(/\\/g, "/");
+    const segments = normInput.split("/").filter((s) => s.length > 0);
+    if (segments.length === 0) throw new Error("Invalid file name");
+    const baseNameRaw = segments.pop()!;
+    const subDirs = segments.join("/");
+
+    const parent = assertInsideVault(
+      subDirs ? path.join(parentDir, subDirs) : parentDir
+    );
+    if (subDirs) {
+      await mkdir(parent, { recursive: true });
+    }
+
+    const hasExt = SUPPORTED_EXT.has(path.extname(baseNameRaw).toLowerCase());
+    const baseName = hasExt ? baseNameRaw : `${baseNameRaw}.md`;
     const ext = path.extname(baseName);
     const stem = baseName.slice(0, baseName.length - ext.length);
 

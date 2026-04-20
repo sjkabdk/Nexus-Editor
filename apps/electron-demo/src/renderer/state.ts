@@ -1,3 +1,5 @@
+import type { LinkIndex } from "./link-index";
+
 export interface AppState {
   filePath: string | null;
   content: string;
@@ -6,6 +8,7 @@ export interface AppState {
   vaultPath: string | null;
   vaultTree: VaultNode[];
   activeFile: string | null;
+  linkIndex: LinkIndex | null;
 }
 
 export function createState(): AppState {
@@ -17,5 +20,6 @@ export function createState(): AppState {
     vaultPath: null,
     vaultTree: [],
     activeFile: null,
+    linkIndex: null,
   };
 }
