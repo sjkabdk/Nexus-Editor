@@ -45,11 +45,22 @@ body,
 
 .editor-container {
   flex: 1;
-  overflow: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.editor-container > .nexus-toolbar,
+.editor-container > [data-nexus-toolbar],
+.editor-container > [role="toolbar"] {
+  flex-shrink: 0;
 }
 
 .editor-container .cm-editor {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
+  height: auto;
 }
 
 .status-line {

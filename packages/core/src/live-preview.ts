@@ -126,6 +126,232 @@ class CodeCopyWidget extends WidgetType {
   }
 }
 
+// ── Mermaid support ─────────────────────────────────────────────────────────
+// Lazy-loaded so the ~500KB mermaid bundle only ships when a user actually
+// renders a mermaid block. Cache keyed by exact source string so unrelated
+// edits elsewhere in the doc don't re-render existing diagrams.
+
+type MermaidAPI = {
+  render(id: string, text: string): Promise<{ svg: string }>;
+  parse(text: string, opts?: { suppressErrors?: boolean }): Promise<boolean | { diagramType: string }> | boolean | { diagramType: string };
+};
+
+let mermaidPromise: Promise<MermaidAPI> | null = null;
+function loadMermaid(): Promise<MermaidAPI> {
+  if (!mermaidPromise) {
+    mermaidPromise = import("mermaid").then((mod) => {
+      const m = (mod as any).default ?? mod;
+      m.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" });
+      return m as MermaidAPI;
+    });
+  }
+  return mermaidPromise;
+}
+
+const MERMAID_CACHE = new Map<string, { svg: string; height: number }>();
+let mermaidIdCounter = 0;
+
+class MermaidWidget extends WidgetType {
+  constructor(
+    private readonly source: string,
+    private readonly viewRef: { current: EditorView | null },
+    private readonly blockFrom: number,
+    private readonly sourceOffsetInBlock: number
+  ) { super(); }
+
+  eq(other: MermaidWidget): boolean {
+    return other.source === this.source;
+  }
+
+  ignoreEvent(): boolean { return true; }
+
+  get estimatedHeight(): number {
+    const cached = MERMAID_CACHE.get(this.source);
+    return cached ? cached.height : 80;
+  }
+
+  toDOM(): HTMLElement {
+    // Container: margin:0, padding for visual spacing (CLAUDE.md rule #11 / thematicBreak pattern).
+    const container = document.createElement("div");
+    container.className = "nexus-mermaid";
+    container.style.cssText = [
+      "display:block",
+      "position:relative",
+      "margin:0",
+      "padding:12px",
+      "background:var(--nexus-bg-subtle)",
+      "border-radius:4px",
+      "min-height:80px",
+      "text-align:center",
+      "overflow:hidden",
+    ].join(";") + ";";
+
+    // Edit icon — always rendered, always on top. stopPropagation so the
+    // click doesn't get swallowed as a widget-surface click.
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.title = "Edit mermaid source";
+    editBtn.setAttribute("aria-label", "Edit mermaid source");
+    editBtn.textContent = "✎";
+    editBtn.style.cssText = [
+      "position:absolute",
+      "top:4px",
+      "right:8px",
+      "padding:2px 8px",
+      "font-size:12px",
+      "font-family:system-ui,sans-serif",
+      "line-height:1.4",
+      "background:var(--nexus-bg)",
+      "border:1px solid var(--nexus-border-subtle)",
+      "border-radius:3px",
+      "color:var(--nexus-text-muted)",
+      "cursor:pointer",
+      "opacity:0.7",
+      "z-index:2",
+      "user-select:none",
+      "transition:opacity .15s",
+    ].join(";") + ";";
+    editBtn.addEventListener("mouseenter", () => { editBtn.style.opacity = "1"; });
+    editBtn.addEventListener("mouseleave", () => { editBtn.style.opacity = "0.7"; });
+    editBtn.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); });
+    editBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const v = this.viewRef.current;
+      if (!v) return;
+      const target = this.blockFrom + this.sourceOffsetInBlock;
+      const safeTarget = Math.min(target, v.state.doc.length);
+      v.dispatch({ selection: { anchor: safeTarget } });
+      v.focus();
+    });
+
+    const diagramHost = document.createElement("div");
+    // max-width on host + responsive SVG (set after innerHTML) prevents the
+    // diagram from overflowing and adding a third scrollbar.
+    diagramHost.style.cssText = "display:block;min-height:64px;max-width:100%;overflow:hidden;";
+    container.appendChild(editBtn);
+    container.appendChild(diagramHost);
+
+    const normalizeSvg = (host: HTMLElement) => {
+      const svg = host.querySelector("svg") as SVGSVGElement | null;
+      if (!svg) return;
+      svg.removeAttribute("height");
+      svg.style.maxWidth = "100%";
+      svg.style.height = "auto";
+      svg.style.display = "block";
+      svg.style.margin = "0 auto";
+    };
+
+    const cached = MERMAID_CACHE.get(this.source);
+    if (cached) {
+      diagramHost.innerHTML = cached.svg;
+      normalizeSvg(diagramHost);
+      return container;
+    }
+
+    // Placeholder while async render resolves.
+    diagramHost.textContent = "Loading diagram…";
+    diagramHost.style.color = "var(--nexus-text-muted)";
+    diagramHost.style.fontSize = "12px";
+    diagramHost.style.padding = "24px 0";
+
+    const id = `nexus-mmd-${++mermaidIdCounter}`;
+    const sourceAtRender = this.source;
+
+    const showError = (message: string) => {
+      if (!container.isConnected) return;
+      diagramHost.style.color = "var(--nexus-hl-deletion, #c33)";
+      diagramHost.style.fontSize = "12px";
+      diagramHost.style.padding = "8px";
+      diagramHost.style.paddingRight = "40px"; // reserve room for the top-right ✎ button
+      diagramHost.style.textAlign = "left";
+      diagramHost.style.fontFamily = "monospace";
+      diagramHost.style.whiteSpace = "pre-wrap";
+      diagramHost.style.minHeight = "40px";
+      diagramHost.textContent = "";
+
+      const header = document.createElement("div");
+      header.textContent = "Mermaid error";
+      header.style.cssText = "font-weight:bold;margin-bottom:4px;";
+
+      const body = document.createElement("div");
+      body.textContent = message;
+      body.style.cssText = "white-space:pre-wrap;";
+
+      const hint = document.createElement("div");
+      hint.style.cssText = "margin-top:8px;font-family:system-ui,sans-serif;color:var(--nexus-text-muted);";
+      const editLink = document.createElement("a");
+      editLink.href = "#";
+      editLink.textContent = "Edit source";
+      editLink.style.cssText = "color:var(--nexus-accent);text-decoration:underline;cursor:pointer;";
+      editLink.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); });
+      editLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const v = this.viewRef.current;
+        if (!v) return;
+        const target = this.blockFrom + this.sourceOffsetInBlock;
+        const safeTarget = Math.min(target, v.state.doc.length);
+        v.dispatch({ selection: { anchor: safeTarget } });
+        v.focus();
+      });
+      hint.appendChild(document.createTextNode("→ "));
+      hint.appendChild(editLink);
+
+      diagramHost.appendChild(header);
+      diagramHost.appendChild(body);
+      diagramHost.appendChild(hint);
+      this.viewRef.current?.requestMeasure();
+    };
+
+    // Cleanup helper: mermaid may leave orphan DOM nodes (temp render host, or
+    // the "bomb" error SVG) attached to document.body when it throws. Remove
+    // any element whose id starts with our prefix to keep the page clean.
+    const cleanupOrphans = (usedId: string) => {
+      const orphan = document.getElementById(usedId);
+      if (orphan && orphan.parentElement === document.body) orphan.remove();
+      const dOrphan = document.getElementById("d" + usedId);
+      if (dOrphan && dOrphan.parentElement === document.body) dOrphan.remove();
+    };
+
+    loadMermaid().then(async (m) => {
+      // Pre-validate via parse (without suppressErrors so we get the real
+      // diagnostic message). parse() — unlike render() — does NOT inject the
+      // default error-bomb SVG into document.body, so this is safe.
+      try {
+        await Promise.resolve(m.parse(sourceAtRender));
+      } catch (err) {
+        showError((err as Error)?.message ?? String(err));
+        cleanupOrphans(id);
+        return;
+      }
+
+      try {
+        const { svg } = await m.render(id, sourceAtRender);
+        cleanupOrphans(id);
+        if (!container.isConnected) {
+          MERMAID_CACHE.set(sourceAtRender, { svg, height: 0 });
+          return;
+        }
+        diagramHost.style.color = "";
+        diagramHost.style.fontSize = "";
+        diagramHost.style.padding = "";
+        diagramHost.style.whiteSpace = "";
+        diagramHost.innerHTML = svg;
+        normalizeSvg(diagramHost);
+        const h = container.offsetHeight || 0;
+        MERMAID_CACHE.set(sourceAtRender, { svg, height: h });
+        this.viewRef.current?.requestMeasure();
+      } catch (err) {
+        cleanupOrphans(id);
+        showError((err as Error)?.message ?? String(err));
+      }
+    });
+
+    return container;
+  }
+}
+
 const BLOCK_NODE_TYPES = new Set(["blockquote", "thematicBreak"]);
 
 const HEADING_FONT_SIZE: Record<number, string> = {
@@ -269,13 +495,27 @@ function getTokenColor(scope: string): string | null {
 function buildCodeBlockDecorations(
   range: { from: number; to: number; node: Code; source: string },
   selection: readonly SelectionRange[],
-  decos: Range<Decoration>[]
+  decos: Range<Decoration>[],
+  viewRef: { current: EditorView | null }
 ): void {
   const source = range.source;
   const lines = source.split("\n");
   const cursorOnCode = selectionIntersects(range.from, range.to, selection, true);
   const firstNewline = source.indexOf("\n");
   const isFenced = /^[ \t]*(`{3,}|~{3,})/.test(source);
+
+  // Mermaid: render as block widget when cursor is NOT in the block. When the
+  // cursor enters (e.g. via edit-icon dispatch or click outside of swallowed
+  // widget), fall through to normal source rendering so the user can edit.
+  if (range.node.lang === "mermaid" && !cursorOnCode && firstNewline >= 0) {
+    decos.push(
+      Decoration.replace({
+        widget: new MermaidWidget(range.node.value ?? "", viewRef, range.from, firstNewline + 1),
+        block: true,
+      }).range(range.from, range.to)
+    );
+    return;
+  }
 
   // ── CRITICAL: line decorations must NOT change font-family/font-size ──
   // CM6's heightmap estimates offscreen lines using the default line height
@@ -478,7 +718,7 @@ function buildDecorations(
     } else if (range.node.type === "list") {
       buildListDecorations(range as { from: number; to: number; node: List }, doc, decos, viewRef);
     } else if (range.node.type === "code" && !config.renderers.code) {
-      buildCodeBlockDecorations(range as { from: number; to: number; node: Code; source: string }, selection, decos);
+      buildCodeBlockDecorations(range as { from: number; to: number; node: Code; source: string }, selection, decos, viewRef);
     } else if (range.node.type === "image") {
       // Always render as widget — cursor toggle between inline-preview and replace-widget
       // caused vertical layout shifts that made click positions drift after selection change.

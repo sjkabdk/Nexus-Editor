@@ -23,6 +23,10 @@ show a long list.
 
 - [[Daily/2026-04-20]]
 
+## Diagrams
+
+- [[mermaid-demo]] — 7 种 mermaid 图表 + 语法错误兜底演示
+
 ## Edge cases
 
 - [[ghost-demo]] — try clicking the red dashed ghost link inside
