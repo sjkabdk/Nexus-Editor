@@ -59,4 +59,128 @@ describe("live preview regressions", () => {
     expect(text).not.toContain("**");
     editor.destroy();
   });
+
+  // Code block lines must not set font-family or font-size on Decoration.line —
+  // only on Decoration.mark. Otherwise CM6's heightmap sees different line heights
+  // for code vs regular lines, causing cumulative click drift in long documents.
+  it("code block Decoration.line does not set font-family/font-size (keeps heightmap uniform)", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      initialValue: "Text\n\n```js\nconst a = 1;\nconst b = 2;\n```\n\nmore",
+      livePreview: true
+    });
+
+    // Code lines have background on the line element (Decoration.line)
+    const bgLines = Array.from(container.querySelectorAll(".cm-line")).filter(
+      (line) => (line as HTMLElement).getAttribute("style")?.includes("background")
+    );
+    expect(bgLines.length).toBeGreaterThanOrEqual(2);
+    for (const line of bgLines) {
+      const style = line.getAttribute("style") ?? "";
+      expect(style).not.toMatch(/font-family\s*:/);
+      expect(style).not.toMatch(/font-size\s*:/);
+    }
+    // Monospace is on child mark spans, not the line itself
+    const monoSpans = bgLines.flatMap((line) =>
+      Array.from(line.querySelectorAll("span")).filter(
+        (span) => span.getAttribute("style")?.includes("monospace")
+      )
+    );
+    expect(monoSpans.length).toBeGreaterThan(0);
+    editor.destroy();
+  });
+
+  // Guards against reintroducing cursor-conditional line-collapsing on definitions.
+  // HEIGHT:0 ↔ full-height toggling on cursor movement was the largest click-drift
+  // source — any cursor transit across a definition line shifted the entire viewport.
+  it("definition line count is identical with cursor on/off (no height toggle)", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      initialValue: "Text\n\n[ref]: https://example.com\n\nend",
+      livePreview: true
+    });
+
+    editor.setSelection(0);
+    const linesCursorOff = container.querySelectorAll(".cm-line").length;
+
+    // Position cursor inside the definition line
+    editor.setSelection(7);
+    const linesCursorOn = container.querySelectorAll(".cm-line").length;
+
+    expect(linesCursorOn).toBe(linesCursorOff);
+    editor.destroy();
+  });
+
+  // Copy button must be present and stable on every fenced code block, regardless of
+  // cursor position. Toggling it would re-create the heightmap instability that the
+  // previous ::after-based language label caused (commit b2f1a31).
+  it("fenced code block renders a copy button in the first fence line", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      initialValue: "Text\n\n```js\nconst a = 1;\n```\n\nend",
+      livePreview: true
+    });
+
+    editor.setSelection(0);
+    const btnOff = Array.from(container.querySelectorAll("button"))
+      .find((b) => b.getAttribute("aria-label") === "Copy code");
+    expect(btnOff).toBeDefined();
+
+    // Cursor inside code block — button still there
+    editor.setSelection(10);
+    const btnOn = Array.from(container.querySelectorAll("button"))
+      .find((b) => b.getAttribute("aria-label") === "Copy code");
+    expect(btnOn).toBeDefined();
+    editor.destroy();
+  });
+
+  // Button label surfaces the language tag (```python → "python", ``` → "Copy").
+  it("copy button label shows the language, or 'Copy' when no language is set", () => {
+    const withLang = document.createElement("div");
+    const editorA = createEditor({
+      container: withLang,
+      initialValue: "```python\nprint(1)\n```",
+      livePreview: true
+    });
+    const btnA = Array.from(withLang.querySelectorAll("button"))
+      .find((b) => b.getAttribute("aria-label") === "Copy code");
+    expect(btnA?.textContent).toBe("python");
+    editorA.destroy();
+
+    const noLang = document.createElement("div");
+    const editorB = createEditor({
+      container: noLang,
+      initialValue: "```\njust text\n```",
+      livePreview: true
+    });
+    const btnB = Array.from(noLang.querySelectorAll("button"))
+      .find((b) => b.getAttribute("aria-label") === "Copy code");
+    expect(btnB?.textContent).toBe("Copy");
+    editorB.destroy();
+  });
+
+  // Guards against reintroducing cursor-conditional widget toggling on images.
+  // Switching between inline-preview (cursor on) and replace-widget (cursor off)
+  // changed vertical block height, drifting click resolution.
+  it("image widget stays present regardless of cursor position", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      initialValue: "Text\n\n![alt](https://example.com/img.png)\n\nend",
+      livePreview: true
+    });
+
+    editor.setSelection(0);
+    const widgetOff = container.querySelector("[data-live-preview-image]");
+    expect(widgetOff).not.toBeNull();
+
+    // Position cursor inside the image markdown
+    editor.setSelection(10);
+    const widgetOn = container.querySelector("[data-live-preview-image]");
+    expect(widgetOn).not.toBeNull();
+    editor.destroy();
+  });
 });
