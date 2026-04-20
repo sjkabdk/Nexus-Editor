@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LinkIndex, stripAnchor } from "../src/renderer/link-index";
+import { LinkIndex, stripAnchor, parseAnchor, findAnchorPosition } from "../src/renderer/link-index";
 
 describe("LinkIndex.resolve", () => {
   it("resolves a globally unique basename", () => {
@@ -111,6 +111,79 @@ describe("stripAnchor", () => {
   it("returns empty when the target begins with an anchor marker", () => {
     expect(stripAnchor("#Heading")).toBe("");
     expect(stripAnchor("^block")).toBe("");
+  });
+});
+
+describe("parseAnchor", () => {
+  it("returns null anchor when the target has none", () => {
+    expect(parseAnchor("Foo")).toEqual({ bare: "Foo", anchor: null });
+  });
+
+  it("splits heading anchors", () => {
+    expect(parseAnchor("Foo#Bar")).toEqual({
+      bare: "Foo",
+      anchor: { kind: "heading", value: "Bar" },
+    });
+  });
+
+  it("splits block anchors", () => {
+    expect(parseAnchor("Foo^blk-1")).toEqual({
+      bare: "Foo",
+      anchor: { kind: "block", value: "blk-1" },
+    });
+  });
+
+  it("respects the first marker (heading wins over later ^)", () => {
+    expect(parseAnchor("Foo#Head^ignored")).toEqual({
+      bare: "Foo",
+      anchor: { kind: "heading", value: "Head^ignored" },
+    });
+  });
+
+  it("allows bare anchors (same-file jump)", () => {
+    expect(parseAnchor("#Bar")).toEqual({
+      bare: "",
+      anchor: { kind: "heading", value: "Bar" },
+    });
+  });
+});
+
+describe("findAnchorPosition", () => {
+  it("locates a top-level heading line", () => {
+    const doc = "intro line\n# First\ntext\n## Second section\nmore";
+    const pos = findAnchorPosition(doc, { kind: "heading", value: "Second section" });
+    expect(pos).not.toBeNull();
+    // Should point at the line start
+    expect(doc.slice(pos!, pos! + 18)).toBe("## Second section\n");
+  });
+
+  it("is case-insensitive and whitespace-tolerant", () => {
+    const doc = "# Hello    World\nbody";
+    const pos = findAnchorPosition(doc, { kind: "heading", value: "hello world" });
+    expect(pos).toBe(0);
+  });
+
+  it("returns null when no heading matches", () => {
+    const doc = "# Alpha\n## Beta";
+    expect(findAnchorPosition(doc, { kind: "heading", value: "Gamma" })).toBeNull();
+  });
+
+  it("matches the last segment of a nested heading path", () => {
+    const doc = "# Parent\ntext\n## Child\nmore";
+    const pos = findAnchorPosition(doc, { kind: "heading", value: "Parent#Child" });
+    expect(pos).not.toBeNull();
+    expect(doc.slice(pos!).startsWith("## Child")).toBe(true);
+  });
+
+  it("locates block refs at end of line", () => {
+    const doc = "first line\nanchor paragraph ^blk-1\nnext line";
+    const pos = findAnchorPosition(doc, { kind: "block", value: "blk-1" });
+    expect(pos).not.toBeNull();
+    expect(doc.slice(pos!).startsWith("anchor paragraph")).toBe(true);
+  });
+
+  it("returns null for unknown block refs", () => {
+    expect(findAnchorPosition("no markers here", { kind: "block", value: "nope" })).toBeNull();
   });
 });
 

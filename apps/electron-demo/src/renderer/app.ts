@@ -4,7 +4,7 @@ import { loadSettings, createSettingsPanel, type EditorSettings } from "./settin
 import { createOutlinePanel, type OutlinePanel } from "./outline-panel";
 import { createSearchBar, type SearchBar } from "./search-bar";
 import { createVaultPanel, type VaultPanel } from "./vault-panel";
-import { LinkIndex, stripAnchor } from "./link-index";
+import { LinkIndex, parseAnchor, findAnchorPosition } from "./link-index";
 import { createBacklinksPanel, type BacklinksPanel } from "./backlinks-panel";
 
 const state: AppState = createState();
@@ -233,15 +233,28 @@ async function seedLinkIndex(): Promise<void> {
 async function handleWikilinkNavigate(target: string, opts: { unresolved: boolean }): Promise<void> {
   try {
     state.error = null;
-    // Strip `#heading` / `^blockid` — v1 navigates to the file regardless of
-    // the anchor. Prevents ENOENT when creating files with illegal names.
-    const bare = stripAnchor(target);
+    // Parse `#heading` / `^blockid` — bare part is what the resolver needs
+    // to match a file on disk; the anchor (if any) is used AFTER the file is
+    // loaded to scroll the editor to the matching heading / block.
+    const { bare, anchor } = parseAnchor(target);
+    if (!bare && !anchor) return;
+
+    // `[[#heading]]` with no bare target means "jump inside the current file".
+    if (!bare && anchor && state.activeFile) {
+      const pos = findAnchorPosition(state.content, anchor);
+      if (pos !== null) shell.editor.setSelection(pos);
+      return;
+    }
     if (!bare) return;
 
     if (!opts.unresolved) {
       const resolved = linkIndex.resolve(bare, state.activeFile);
       if (resolved) {
         await handleVaultFileOpen(resolved);
+        if (anchor) {
+          const pos = findAnchorPosition(state.content, anchor);
+          if (pos !== null) shell.editor.setSelection(pos);
+        }
       }
       return;
     }

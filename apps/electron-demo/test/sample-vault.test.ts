@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { LinkIndex } from "../src/renderer/link-index";
+import { LinkIndex, findAnchorPosition, parseAnchor } from "../src/renderer/link-index";
 
 const VAULT_ROOT = path.resolve(__dirname, "../sample-vault");
 const SUPPORTED = new Set([".md", ".markdown", ".txt"]);
@@ -142,6 +142,30 @@ describe("sample-vault fixture — end-to-end wiki-link behavior", () => {
     expect(idx.resolve("Projects/Nexus-Editor^some-block", ideas)).toBe(
       path.join(VAULT_ROOT, "Projects/Nexus-Editor.md")
     );
+  });
+
+  it("#Context anchor in Ideas.md points into the real Context heading of Nexus-Editor.md", async () => {
+    const nexus = path.join(VAULT_ROOT, "Projects/Nexus-Editor.md");
+    const content = await readFile(nexus, "utf-8");
+    const { anchor } = parseAnchor("Projects/Nexus-Editor#Context");
+    expect(anchor).not.toBeNull();
+    const pos = findAnchorPosition(content, anchor!);
+    expect(pos).not.toBeNull();
+    // Position must start with the Context heading line.
+    expect(content.slice(pos!).startsWith("## Context")).toBe(true);
+  });
+
+  it("^some-block anchor in Ideas.md points into the tagged paragraph", async () => {
+    const nexus = path.join(VAULT_ROOT, "Projects/Nexus-Editor.md");
+    const content = await readFile(nexus, "utf-8");
+    const { anchor } = parseAnchor("Projects/Nexus-Editor^some-block");
+    expect(anchor).not.toBeNull();
+    const pos = findAnchorPosition(content, anchor!);
+    expect(pos).not.toBeNull();
+    // Line should contain the block ref marker.
+    const lineEnd = content.indexOf("\n", pos!);
+    const line = content.slice(pos!, lineEnd === -1 ? undefined : lineEnd);
+    expect(line).toContain("^some-block");
   });
 
   it("getAllNoteNames lists unique basenames including Meeting only once", async () => {

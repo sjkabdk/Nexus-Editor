@@ -53,6 +53,75 @@ export function stripAnchor(target: string): string {
   return target.slice(0, cut).trim();
 }
 
+export type LinkAnchor =
+  | { kind: "heading"; value: string }
+  | { kind: "block"; value: string };
+
+/**
+ * Split a wiki-link target into the bare path part and its Obsidian anchor
+ * (if any). Heading anchors use `#`, block refs use `^`.
+ */
+export function parseAnchor(target: string): { bare: string; anchor: LinkAnchor | null } {
+  const bare = stripAnchor(target);
+  const hash = target.indexOf("#");
+  const caret = target.indexOf("^");
+  if (hash < 0 && caret < 0) return { bare, anchor: null };
+  // Whichever marker appears first wins; any subsequent `#` in a heading
+  // anchor is legal Obsidian syntax (nested heading path), so keep the raw
+  // substring after the first marker.
+  if (hash >= 0 && (caret < 0 || hash < caret)) {
+    return { bare, anchor: { kind: "heading", value: target.slice(hash + 1).trim() } };
+  }
+  return { bare, anchor: { kind: "block", value: target.slice(caret + 1).trim() } };
+}
+
+function normalizeHeadingText(s: string): string {
+  return s.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * Find the character offset in `content` that corresponds to the given link
+ * anchor, or null when no match. Offsets point at the start of the matching
+ * line so `editor.setSelection(pos)` scrolls the heading/block into view.
+ *
+ * - Heading: matches any `# Heading` / `## Heading` line whose rendered text
+ *   equals the anchor value under whitespace-collapsed, case-insensitive
+ *   comparison. Obsidian also supports `#Parent#Child` (nested heading path)
+ *   — for v1 we match on the LAST segment only, which is enough for the
+ *   unambiguous case and degrades gracefully for duplicate sub-headings.
+ * - Block: matches the first line that contains ` ^<id>` (possibly at EOL).
+ */
+export function findAnchorPosition(content: string, anchor: LinkAnchor): number | null {
+  if (anchor.kind === "heading") {
+    const segments = anchor.value.split("#").map((s) => s.trim()).filter(Boolean);
+    if (segments.length === 0) return null;
+    const needle = normalizeHeadingText(segments[segments.length - 1]);
+    const lines = content.split("\n");
+    let offset = 0;
+    for (const line of lines) {
+      const m = /^(\s{0,3})(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+      if (m) {
+        const headingText = normalizeHeadingText(m[3]);
+        if (headingText === needle) return offset;
+      }
+      offset += line.length + 1; // +1 for the newline
+    }
+    return null;
+  }
+  // Block ref: ` ^<id>` preceded by whitespace or at line start, not part of a
+  // longer word. Obsidian stores block IDs at end of a line by convention but
+  // we're lenient about position.
+  const id = anchor.value;
+  if (!id) return null;
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(?:^|\\s)\\^${escaped}(?=\\s|$)`, "m");
+  const m = re.exec(content);
+  if (!m) return null;
+  // Return the start of the line containing the match.
+  const matchIdx = m.index + (m[0].startsWith("^") ? 0 : 1);
+  return content.lastIndexOf("\n", matchIdx - 1) + 1;
+}
+
 function snippetAround(content: string, from: number, to: number): string {
   const lineStart = content.lastIndexOf("\n", from - 1) + 1;
   const nl = content.indexOf("\n", to);
