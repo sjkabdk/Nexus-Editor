@@ -18,6 +18,19 @@ function basename(p: string): string {
   return slash >= 0 ? norm.slice(slash + 1) : norm;
 }
 
+function scheduleLowPriority(cb: () => void): () => void {
+  const w = globalThis as {
+    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+    cancelIdleCallback?: (id: number) => void;
+  };
+  if (typeof w.requestIdleCallback === "function") {
+    const id = w.requestIdleCallback(cb, { timeout: 250 });
+    return () => w.cancelIdleCallback?.(id);
+  }
+  const id = setTimeout(cb, 60);
+  return () => clearTimeout(id);
+}
+
 const PANEL_STYLES = `
   width: 280px;
   flex-shrink: 0;
@@ -128,16 +141,22 @@ export function createBacklinksPanel(options: BacklinksPanelOptions): BacklinksP
   list.style.cssText = LIST_STYLES;
   root.appendChild(list);
 
-  function renderSectionHeader(title: string, count: number, parent: HTMLElement): void {
+  function renderSectionHeader(title: string, count: number, parent: HTMLElement): HTMLElement {
     const h = document.createElement("div");
     h.style.cssText = SECTION_HEADER_STYLES;
+    renderSectionHeaderInto(h, title, count);
+    parent.appendChild(h);
+    return h;
+  }
+
+  function renderSectionHeaderInto(h: HTMLElement, title: string, count: number): void {
+    h.textContent = "";
     const label = document.createElement("span");
     label.textContent = title;
     const badge = document.createElement("span");
     badge.style.cssText = BADGE_STYLES;
     badge.textContent = String(count);
     h.append(label, badge);
-    parent.appendChild(h);
   }
 
   function renderItem(hit: BacklinkHit, parent: HTMLElement): void {
@@ -173,7 +192,15 @@ export function createBacklinksPanel(options: BacklinksPanelOptions): BacklinksP
     parent.appendChild(empty);
   }
 
+  let pendingUnlinkedCancel: (() => void) | null = null;
+  let destroyed = false;
+
   function refresh(): void {
+    if (destroyed) return;
+    if (pendingUnlinkedCancel) {
+      pendingUnlinkedCancel();
+      pendingUnlinkedCancel = null;
+    }
     list.textContent = "";
     const active = getActiveFile();
     if (!active) {
@@ -182,11 +209,10 @@ export function createBacklinksPanel(options: BacklinksPanelOptions): BacklinksP
       return;
     }
 
+    // Fast path: linked mentions are O(1) (Map lookup) — render immediately.
     const linked = index.getBacklinks(active);
-    const unlinked = index.getUnlinkedMentions(active);
-    header.textContent = `Backlinks · ${linked.length} linked · ${unlinked.length} mention${unlinked.length === 1 ? "" : "s"}`;
+    header.textContent = `Backlinks · ${linked.length} linked · … mentions`;
 
-    // Linked mentions section
     renderSectionHeader("Linked mentions", linked.length, list);
     if (linked.length === 0) {
       renderEmpty("No linked mentions", list);
@@ -194,13 +220,36 @@ export function createBacklinksPanel(options: BacklinksPanelOptions): BacklinksP
       for (const hit of linked) renderItem(hit, list);
     }
 
-    // Unlinked mentions section
-    renderSectionHeader("Unlinked mentions", unlinked.length, list);
-    if (unlinked.length === 0) {
-      renderEmpty("No unlinked mentions", list);
-    } else {
-      for (const hit of unlinked) renderItem(hit, list);
-    }
+    // Placeholder for unlinked section — filled asynchronously so we don't
+    // block the UI thread with the O(vault-size) regex scan in
+    // getUnlinkedMentions.
+    const unlinkedHeader = renderSectionHeader("Unlinked mentions", 0, list);
+    unlinkedHeader.textContent = "Unlinked mentions — scanning…";
+    const unlinkedContainer = document.createElement("div");
+    list.appendChild(unlinkedContainer);
+
+    pendingUnlinkedCancel = scheduleLowPriority(() => {
+      pendingUnlinkedCancel = null;
+      // Bail if the active file changed while we were waiting.
+      if (destroyed || getActiveFile() !== active) return;
+      const t0 = performance.now();
+      const unlinked = index.getUnlinkedMentions(active);
+      const t1 = performance.now();
+      if ((globalThis as { NEXUS_PERF?: boolean }).NEXUS_PERF !== false && t1 - t0 > 5) {
+        // eslint-disable-next-line no-console
+        console.log("%c[perf]", "color:#0aa;font-weight:bold",
+          "backlinks.unlinked-scan", `${(t1 - t0).toFixed(1)}ms`,
+          { hits: unlinked.length });
+      }
+      header.textContent = `Backlinks · ${linked.length} linked · ${unlinked.length} mention${unlinked.length === 1 ? "" : "s"}`;
+      unlinkedHeader.textContent = "";
+      renderSectionHeaderInto(unlinkedHeader, "Unlinked mentions", unlinked.length);
+      if (unlinked.length === 0) {
+        renderEmpty("No unlinked mentions", unlinkedContainer);
+      } else {
+        for (const hit of unlinked) renderItem(hit, unlinkedContainer);
+      }
+    });
   }
 
   const unsubscribe = index.subscribe(() => refresh());
@@ -210,6 +259,11 @@ export function createBacklinksPanel(options: BacklinksPanelOptions): BacklinksP
     element: root,
     refresh,
     destroy() {
+      destroyed = true;
+      if (pendingUnlinkedCancel) {
+        pendingUnlinkedCancel();
+        pendingUnlinkedCancel = null;
+      }
       unsubscribe();
       root.remove();
     },

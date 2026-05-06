@@ -6,6 +6,9 @@ import { createSearchBar, type SearchBar } from "./search-bar";
 import { createVaultPanel, type VaultPanel } from "./vault-panel";
 import { LinkIndex, parseAnchor, findAnchorPosition } from "./link-index";
 import { createBacklinksPanel, type BacklinksPanel } from "./backlinks-panel";
+import { perfStart, perfEnd, installLongTaskWatch } from "./perf";
+
+installLongTaskWatch(50);
 
 const state: AppState = createState();
 let settings: EditorSettings = loadSettings();
@@ -200,19 +203,34 @@ function toggleBacklinks(): void {
 }
 
 async function handleVaultFileOpen(filePath: string): Promise<void> {
+  const total = perfStart("open-file", { filePath });
   try {
     state.error = null;
     if (!(await confirmDiscardIfDirty())) return;
+
+    const ipc = perfStart("open-file.ipc-read");
     const result = await window.nexusDemo.vault.read(filePath);
+    perfEnd(ipc, { bytes: result.content.length });
+
     state.filePath = result.path;
     state.activeFile = result.path;
+
+    const load = perfStart("open-file.loadDocument");
     shell.loadDocument(result.content);
+    perfEnd(load);
+
+    const setActive = perfStart("open-file.vault.setActiveFile");
     vault.setActiveFile(result.path);
+    perfEnd(setActive);
+
+    const bl = perfStart("open-file.backlinks.refresh");
     backlinks.refresh();
+    perfEnd(bl);
   } catch (err) {
     state.error = err instanceof Error ? err.message : String(err);
   }
   renderStatus();
+  perfEnd(total);
 }
 
 function dirname(p: string): string {
@@ -221,13 +239,35 @@ function dirname(p: string): string {
   return slash >= 0 ? norm.slice(0, slash) : "";
 }
 
+/** Coalesce repeated re-seeds (e.g. a burst of FS changes) into a single run. */
+let seedToken = 0;
 async function seedLinkIndex(): Promise<void> {
+  const myToken = ++seedToken;
+  const total = perfStart("seed-link-index");
   try {
+    const ipc = perfStart("seed-link-index.ipc-readAll");
     const files = await window.nexusDemo.vault.readAll();
-    linkIndex.rebuild(files);
+    const totalBytes = files.reduce((n, f) => n + f.content.length, 0);
+    perfEnd(ipc, { files: files.length, bytes: totalBytes });
+
+    if (myToken !== seedToken) {
+      perfEnd(total, { superseded: true });
+      return;
+    }
+
+    const rebuild = perfStart("seed-link-index.rebuildAsync");
+    const committed = await linkIndex.rebuildAsync(files, {
+      isCancelled: () => myToken !== seedToken,
+    });
+    perfEnd(rebuild, { files: files.length, committed });
+    if (!committed) {
+      perfEnd(total, { superseded: true });
+      return;
+    }
   } catch (err) {
     console.warn("seedLinkIndex failed:", err);
   }
+  perfEnd(total);
 }
 
 async function handleWikilinkNavigate(target: string, opts: { unresolved: boolean }): Promise<void> {
@@ -290,8 +330,9 @@ async function tryRestoreLastVault(): Promise<void> {
     if (last.lastVault) {
       state.vaultPath = last.lastVault;
       await vault.openVault(last.lastVault);
-      await seedLinkIndex();
       renderStatus();
+      // Build link index in the background — the editor is usable without it.
+      void seedLinkIndex();
     }
   } catch (err) {
     // swallow — missing vault is a normal case
@@ -300,6 +341,7 @@ async function tryRestoreLastVault(): Promise<void> {
 }
 
 function boot(): void {
+  const bootScope = perfStart("boot");
   const root = document.getElementById("app");
   if (!root) throw new Error("Missing #app element");
 
@@ -352,8 +394,9 @@ function boot(): void {
   vault.openVault = async (nextPath: string) => {
     await originalOpenVault(nextPath);
     state.vaultPath = nextPath;
-    await seedLinkIndex();
     renderStatus();
+    // Index in the background — don't block the editor on it.
+    void seedLinkIndex();
   };
 
   outline = createOutlinePanel(shell.editor);
@@ -380,7 +423,18 @@ function boot(): void {
   });
 
   renderStatus();
-  void tryRestoreLastVault();
+  perfEnd(bootScope);
+
+  // Defer vault restore until after first paint so the window pops open with
+  // a usable UI; the vault read + link-index seed then runs while the user
+  // is still looking at the empty editor — invisible to them.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        void tryRestoreLastVault();
+      }, 0);
+    });
+  });
 }
 
 boot();

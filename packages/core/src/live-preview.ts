@@ -1,7 +1,10 @@
-import { StateField, type Extension, type Range, type SelectionRange, type Transaction } from "@codemirror/state";
+import { type EditorState, StateField, type Extension, type Range, type SelectionRange, type Transaction } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
-import hljs from "highlight.js";
 import type { Code, FootnoteDefinition, FootnoteReference, Heading, List, Root, Table } from "mdast";
+
+import type { CodeHighlightToken } from "./types";
+import { lezerTreeToMdast } from "./lezer-mdast-adapter";
+import { highlightCodeBlock } from "./live-preview-highlight";
 
 import { createLivePreviewDiagnostics } from "./live-preview-diag";
 import { collectLivePreviewRanges, selectionIntersects, selectionOnSameLine } from "./live-preview-ranges";
@@ -12,7 +15,6 @@ import type {
   LivePreviewLabels,
   LivePreviewNodeType,
   LivePreviewRenderer,
-  ParserLike
 } from "./types";
 
 interface NormalizedLivePreviewConfig {
@@ -30,11 +32,42 @@ function createEmptyAst(): Root {
   return { type: "root", children: [] };
 }
 
-function parseDocument(parser: ParserLike, markdown: string): Root {
+function parseFromState(state: EditorState): Root {
   try {
-    return parser.parse(markdown);
+    return lezerTreeToMdast(state);
   } catch {
     return createEmptyAst();
+  }
+}
+
+/**
+ * Walk the mdast Root and synchronously highlight every fenced code block.
+ * Replaces what the worker used to ship in `codeTokens`. Runs on the main
+ * thread but is bounded by the slim hljs language set + per-block LRU cache,
+ * so cursor moves and unrelated edits don't re-highlight unchanged blocks.
+ */
+function highlightAllCodeBlocks(ast: Root, doc: string): CodeHighlightToken[] {
+  const tokens: CodeHighlightToken[] = [];
+  walkCodeBlocks(ast, (code) => {
+    if (!code.lang || !code.value) return;
+    const blockFrom = code.position?.start.offset ?? -1;
+    if (blockFrom < 0) return;
+    const fenceBlock = doc.slice(blockFrom);
+    const firstNewline = fenceBlock.indexOf("\n");
+    if (firstNewline < 0) return;
+    const contentStart = blockFrom + firstNewline + 1;
+    const blockTokens = highlightCodeBlock(code.lang, code.value, contentStart);
+    for (const t of blockTokens) tokens.push(t);
+  });
+  return tokens;
+}
+
+function walkCodeBlocks(node: unknown, visit: (n: Code) => void): void {
+  if (!node || typeof node !== "object") return;
+  const n = node as { type?: string; children?: unknown[] };
+  if (n.type === "code") visit(node as Code);
+  if (Array.isArray(n.children)) {
+    for (const c of n.children) walkCodeBlocks(c, visit);
   }
 }
 
@@ -54,9 +87,33 @@ function normalizeConfig(
   };
 }
 
-function createWidget(element: HTMLElement, swallowEvents = false, heightHint?: number): WidgetType {
+function createWidget(
+  source: HTMLElement | (() => HTMLElement),
+  swallowEvents = false,
+  heightHint?: number,
+  eqKey?: string,
+): WidgetType {
+  // Eager path: caller already built the element. Lazy path: caller passes a
+  // builder closure and we defer DOM construction to first toDOM(), so widgets
+  // outside the CM6 viewport pay nothing until scrolled in.
+  let element: HTMLElement | null = typeof source === "function" ? null : source;
+  const builder = typeof source === "function" ? source : null;
   return new (class extends WidgetType {
-    toDOM() { return element; }
+    /** Stable identity used by eq() so CM6 reuses old DOM across rebuilds. */
+    readonly _eqKey = eqKey;
+    toDOM(): HTMLElement {
+      if (element) return element;
+      element = builder!();
+      return element;
+    }
+    eq(other: WidgetType): boolean {
+      // Without a key we fall back to CM6's default (object identity → false),
+      // forcing a rebuild every transaction. That's the old behavior and is
+      // safe; only opt-in callers that pass a stable eqKey get DOM reuse.
+      if (this._eqKey === undefined) return false;
+      const otherKey = (other as { _eqKey?: string })._eqKey;
+      return otherKey === this._eqKey;
+    }
     ignoreEvent() { return swallowEvents; }
     // For block widgets, giving CM6 a pre-measure height prevents the heightmap
     // from assigning 0 and then jumping to the real height on first measure.
@@ -473,30 +530,16 @@ function buildListDecorations(
 }
 
 // Token-to-CSS-variable map (colors come from the theme)
-const HLJS_COLORS: Record<string, string> = {
-  keyword: "var(--nexus-hl-keyword)", "selector-tag": "var(--nexus-hl-keyword)", "built_in": "var(--nexus-hl-keyword)", name: "var(--nexus-hl-keyword)", doctag: "var(--nexus-hl-keyword)",
-  string: "var(--nexus-hl-string)", attr: "var(--nexus-hl-string)", symbol: "var(--nexus-hl-string)", bullet: "var(--nexus-hl-string)", addition: "var(--nexus-hl-string)", regexp: "var(--nexus-hl-string)", link: "var(--nexus-hl-string)",
-  title: "var(--nexus-hl-title)", section: "var(--nexus-hl-title)", "title.function_": "var(--nexus-hl-title)",
-  comment: "var(--nexus-hl-comment)", quote: "var(--nexus-hl-comment)", meta: "var(--nexus-hl-comment)",
-  number: "var(--nexus-hl-number)", literal: "var(--nexus-hl-number)",
-  type: "var(--nexus-hl-type)", params: "var(--nexus-hl-type)",
-  deletion: "var(--nexus-hl-deletion)",
-  variable: "var(--nexus-hl-variable)", "template-variable": "var(--nexus-hl-variable)",
-};
-
-function getTokenColor(scope: string): string | null {
-  if (HLJS_COLORS[scope]) return HLJS_COLORS[scope];
-  // Try prefix match (e.g., "title.function_" → "title")
-  const dot = scope.indexOf(".");
-  if (dot > 0) return HLJS_COLORS[scope.slice(0, dot)] ?? null;
-  return null;
-}
+// NOTE: HLJS_COLORS / getTokenColor removed — highlight decorations now use
+// hljs-* CSS classes directly (produced by the parser worker), so color
+// mapping happens in stylesheets, not TS. See style.css for hljs rules.
 
 function buildCodeBlockDecorations(
   range: { from: number; to: number; node: Code; source: string },
   selection: readonly SelectionRange[],
   decos: Range<Decoration>[],
-  viewRef: { current: EditorView | null }
+  viewRef: { current: EditorView | null },
+  codeTokens?: readonly import("./types").CodeHighlightToken[]
 ): void {
   const source = range.source;
   const lines = source.split("\n");
@@ -584,52 +627,30 @@ function buildCodeBlockDecorations(
     lineOffset = lineEnd + 1;
   }
 
-  // Syntax highlighting — always applied
-  if (range.node.value && firstNewline >= 0) {
-    const lang = range.node.lang;
-    let result: hljs.HighlightResult | null = null;
-    try {
-      if (lang && hljs.getLanguage(lang)) {
-        result = hljs.highlight(range.node.value, { language: lang });
-      } else if (lang) {
-        result = hljs.highlightAuto(range.node.value);
-      }
-    } catch { /* ignore hljs errors */ }
-
-    if (result) {
-      const contentStart = range.from + firstNewline + 1;
-      applyHljsTokens(result._emitter as any, contentStart, decos);
+  // Syntax highlighting — NEVER run on the main thread any more. The parser
+  // worker pre-computes highlight spans and hands them in via `codeTokens`
+  // (filtered to this block's range below). If no tokens are available yet
+  // (worker hasn't responded for this document), the code block renders
+  // unstyled and gets coloured on the next buildDecorations pass once the
+  // worker response has been merged into the AST cache.
+  if (codeTokens && codeTokens.length > 0 && firstNewline >= 0 && range.node.value) {
+    // Tokens are sorted by `from` in the worker; still filter since one
+    // code block gets decorations for only its subrange.
+    const contentStart = range.from + firstNewline + 1;
+    const contentEnd = range.to;
+    for (const tok of codeTokens) {
+      if (tok.from >= contentEnd) break;
+      if (tok.to <= contentStart) continue;
+      if (tok.from < range.from || tok.to > range.to) continue;
+      decos.push(
+        Decoration.mark({ class: tok.className }).range(tok.from, tok.to)
+      );
     }
   }
 }
 
-function applyHljsTokens(emitter: any, offset: number, decos: Range<Decoration>[]): void {
-  if (!emitter || !emitter.rootNode) return;
-
-  function walk(node: any, pos: number): number {
-    if (typeof node === "string") {
-      return pos + node.length;
-    }
-    if (node.children) {
-      const color = node.scope ? getTokenColor(node.scope) : null;
-      const start = pos;
-      let cur = pos;
-      for (const child of node.children) {
-        cur = walk(child, cur);
-      }
-      if (color && cur > start) {
-        decos.push(Decoration.mark({ attributes: { style: "color:" + color } }).range(offset + start, offset + cur));
-      }
-      return cur;
-    }
-    return pos;
-  }
-
-  let pos = 0;
-  for (const child of emitter.rootNode.children) {
-    pos = walk(child, pos);
-  }
-}
+// NOTE: applyHljsTokens removed — highlighting is now pre-computed in the
+// parser worker and handed in as `codeTokens` to buildCodeBlockDecorations.
 
 interface InlineMarkerStyle {
   openLen: number;
@@ -687,17 +708,38 @@ function getInlineMarkerStyle(nodeType: string, source: string): InlineMarkerSty
   }
 }
 
-function buildDecorations(
-  doc: string,
-  selection: readonly SelectionRange[],
-  parser: ParserLike,
-  config: NormalizedLivePreviewConfig,
-  viewRef: { current: EditorView | null }
-): DecorationSet {
-  if (!config.enabled) return Decoration.none;
+interface BuildContext {
+  /** Optional pre-computed Lezer mdast snapshot (avoids re-parsing on cursor-only updates). */
+  ast?: Root;
+  /** Optional pre-computed code highlight tokens for the snapshot's fenced blocks. */
+  codeTokens?: CodeHighlightToken[];
+}
 
-  const ast = parseDocument(parser, doc);
+function buildDecorations(
+  state: EditorState,
+  selection: readonly SelectionRange[],
+  config: NormalizedLivePreviewConfig,
+  viewRef: { current: EditorView | null },
+  ctx: BuildContext
+): { decos: DecorationSet; ast: Root; codeTokens: CodeHighlightToken[] } {
+  if (!config.enabled) return { decos: Decoration.none, ast: ctx.ast ?? createEmptyAst(), codeTokens: [] };
+
+  const perfEnabled = (globalThis as { NEXUS_PERF?: boolean }).NEXUS_PERF !== false;
+  const t0 = perfEnabled ? performance.now() : 0;
+  const doc = state.doc.toString();
+  // Lezer-driven adapter: synchronous, viewport-agnostic, intrinsic to the
+  // EditorState. No worker round-trip, no async cache invalidation. Reuse
+  // a pre-computed ast when the caller already walked the tree this turn
+  // (cursor-only updates pass the previous build's ast through ctx).
+  const ast = ctx.ast ?? parseFromState(state);
+  const t1 = perfEnabled ? performance.now() : 0;
+  // Highlight tokens are computed ON DEMAND but cached: identical (lang, code)
+  // pairs hit the LRU in highlightCodeBlock so cursor moves don't re-tokenize.
+  const codeTokens = ctx.codeTokens ?? highlightAllCodeBlocks(ast, doc);
+  const t1b = perfEnabled ? performance.now() : 0;
   const ranges = collectLivePreviewRanges(ast, doc, selection);
+  const t2 = perfEnabled ? performance.now() : 0;
+  const astHit = !!ctx.ast;
   const decos: Range<Decoration>[] = [];
   const parentSpans: [number, number][] = [];
 
@@ -718,7 +760,7 @@ function buildDecorations(
     } else if (range.node.type === "list") {
       buildListDecorations(range as { from: number; to: number; node: List }, doc, decos, viewRef);
     } else if (range.node.type === "code" && !config.renderers.code) {
-      buildCodeBlockDecorations(range as { from: number; to: number; node: Code; source: string }, selection, decos, viewRef);
+      buildCodeBlockDecorations(range as { from: number; to: number; node: Code; source: string }, selection, decos, viewRef, codeTokens);
     } else if (range.node.type === "image") {
       // Cursor-aware + preview-alongside:
       //   * cursor OUT  → replace widget (source hidden).
@@ -729,17 +771,24 @@ function buildDecorations(
       // swallowEvents=true so interactive chrome inside a custom image renderer
       // isn't preempted by CM6's cursor-placement handler.
       const cursorOnImage = selectionIntersects(range.from, range.to, selection, true);
+      // Stable identity keyed by content + position lets CM6 reuse the existing
+      // DOM across cursor-only updates and unrelated edits — image renderers
+      // are heavy (50+ DOM nodes with inline styles), so skipping the rebuild
+      // is the bulk of the buildWidgets win on documents with many images.
+      const imgKey = `image:${range.from}:${range.to}:${cursorOnImage ? "in" : "out"}:${range.source}`;
+      const buildImg = (): HTMLElement =>
+        renderLivePreviewNode(range.node, range.source, config.renderers, range.from, range.to);
       if (!cursorOnImage) {
         decos.push(
           Decoration.replace({
-            widget: createWidget(renderLivePreviewNode(range.node, range.source, config.renderers, range.from, range.to), true)
+            widget: createWidget(buildImg, true, undefined, imgKey)
           }).range(range.from, range.to)
         );
       } else {
         // Edit mode: keep source text visible; also render the image below.
         decos.push(
           Decoration.widget({
-            widget: createWidget(renderLivePreviewNode(range.node, range.source, config.renderers, range.from, range.to), true),
+            widget: createWidget(buildImg, true, undefined, imgKey),
             block: true,
             side: 1,
           }).range(range.to)
@@ -835,9 +884,15 @@ function buildDecorations(
             heightHint = lineCount * 21 + 16;
           }
         }
+        const blockKey = `${range.node.type}:${range.from}:${range.to}:${range.source}`;
         decos.push(
           Decoration.replace({
-            widget: createWidget(renderLivePreviewNode(range.node, range.source, config.renderers, range.from, range.to), isBlock, heightHint),
+            widget: createWidget(
+              () => renderLivePreviewNode(range.node, range.source, config.renderers, range.from, range.to),
+              isBlock,
+              heightHint,
+              blockKey,
+            ),
             block: isBlock
           }).range(range.from, range.to)
         );
@@ -845,11 +900,37 @@ function buildDecorations(
     }
   }
 
-  return Decoration.set(decos, true);
+  const set = Decoration.set(decos, true);
+  if (perfEnabled) {
+    const t3 = performance.now();
+    const parseMs = t1 - t0;
+    const rangesMs = t2 - t1;
+    const buildMs = t3 - t2;
+    const total = t3 - t0;
+    // Only log when any stage is non-trivial, to avoid flooding the console
+    // during normal cursor movement on small files.
+    if (total > 5 || parseMs > 2) {
+      // eslint-disable-next-line no-console
+      console.log(
+        "%c[perf]", "color:#0aa;font-weight:bold",
+        "buildDecorations",
+        `total=${total.toFixed(1)}ms`,
+        {
+          astHit,
+          parse: +parseMs.toFixed(1),
+          collectRanges: +rangesMs.toFixed(1),
+          buildWidgets: +buildMs.toFixed(1),
+          docLen: doc.length,
+          ranges: ranges.length,
+          decos: decos.length,
+        },
+      );
+    }
+  }
+  return { decos: set, ast, codeTokens };
 }
 
 export function createLivePreviewExtension(
-  parser: ParserLike,
   config: boolean | LivePreviewConfig | undefined,
   localeLabels?: LivePreviewLabels
 ): Extension[] {
@@ -862,16 +943,40 @@ export function createLivePreviewExtension(
 
   const viewRef: { current: EditorView | null } = { current: null };
 
+  // Cache the most recent (doc, ast, codeTokens) tuple keyed by doc string.
+  // Cursor-only updates pass this through as ctx so we skip the Lezer→mdast
+  // walk and the hljs run when the source hasn't changed. Edits replace the
+  // cache via the docChanged branch below.
+  let lastBuilt: { doc: string; ast: Root; codeTokens: CodeHighlightToken[] } | null = null;
+
+  function build(state: EditorState, selection: readonly SelectionRange[], reuseCache: boolean) {
+    const docStr = state.doc.toString();
+    const ctx: BuildContext = reuseCache && lastBuilt && lastBuilt.doc === docStr
+      ? { ast: lastBuilt.ast, codeTokens: lastBuilt.codeTokens }
+      : {};
+    const out = buildDecorations(state, selection, normalized, viewRef, ctx);
+    lastBuilt = { doc: docStr, ast: out.ast, codeTokens: out.codeTokens };
+    return out.decos;
+  }
+
   const field = StateField.define<DecorationSet>({
     create(state) {
-      return buildDecorations(state.doc.toString(), state.selection.ranges, parser, normalized, viewRef);
+      return build(state, state.selection.ranges, false);
     },
     update(decos: DecorationSet, tr: Transaction) {
       if (isTableEditing()) {
         return tr.docChanged ? decos.map(tr.changes) : decos;
       }
-      if (tr.docChanged || tr.selection) {
-        return buildDecorations(tr.state.doc.toString(), tr.state.selection.ranges, parser, normalized, viewRef);
+      if (tr.docChanged) {
+        // Doc changed → invalidate the cache and rebuild from the live Lezer
+        // tree. Lezer's parse is incremental (intrinsic to EditorState), so
+        // this is cheap regardless of doc length.
+        return build(tr.state, tr.state.selection.ranges, false);
+      }
+      if (tr.selection) {
+        // Selection-only update → reuse the previous ast + codeTokens; only
+        // the cursor-aware decoration toggles need to rerun.
+        return build(tr.state, tr.state.selection.ranges, true);
       }
       return decos;
     },

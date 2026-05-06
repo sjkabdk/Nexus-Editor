@@ -1,4 +1,8 @@
-import hljs from "highlight.js";
+// NOTE: highlight.js is NO LONGER imported on the main thread. The default
+// code renderer produces a plain <pre><code>. Live-preview colour spans come
+// from the parser worker (see live-preview.ts buildCodeBlockDecorations),
+// so there's no need for a synchronous hljs path here. Consumers who pass a
+// custom `code` renderer can run their own highlighter.
 
 import type {
   LivePreviewNode,
@@ -105,13 +109,9 @@ export function createDefaultRenderer(context: LivePreviewRenderContext): HTMLEl
       const code = document.createElement("code");
       const lang = context.node.lang;
 
-      if (lang && hljs.getLanguage(lang)) {
-        code.innerHTML = hljs.highlight(context.node.value, { language: lang }).value;
-      } else if (lang) {
-        code.innerHTML = hljs.highlightAuto(context.node.value).value;
-      } else {
-        code.textContent = context.node.value;
-      }
+      // Plain text — colouring happens via hljs-* class decorations emitted
+      // by the worker-backed live-preview pipeline.
+      code.textContent = context.node.value;
 
       if (lang) {
         code.setAttribute("data-language", lang);

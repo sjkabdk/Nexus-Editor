@@ -123,6 +123,31 @@ describe("wikilinks decorations (rendered output)", () => {
     expect(span.getAttribute("data-wikilink-unresolved")).toBeNull();
     editor.destroy();
   });
+
+  it("does not let live preview render [[target]] as a markdown shortcut link", () => {
+    const container = document.createElement("div");
+    const editor = createEditor({
+      container,
+      initialValue: "Back to [[index]].\n\nend",
+      livePreview: true,
+      plugins: [
+        createWikilinksPlugin({
+          resolve: (n) => (n === "index" ? "/vault/index.md" : null),
+        }),
+      ],
+    });
+
+    editor.setSelection(editor.getDocument().length);
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("index");
+    expect(text).not.toContain("[index]");
+    expect(container.querySelector("[data-link-url]")).toBeNull();
+    const wiki = container.querySelector("[data-wikilink-target]");
+    expect(wiki).not.toBeNull();
+    expect(wiki?.getAttribute("data-wikilink-target")).toBe("index");
+    editor.destroy();
+  });
 });
 
 describe("wikilinks navigation callback", () => {

@@ -2,8 +2,30 @@ import type { Extension } from "@codemirror/state";
 import type { Blockquote, Code, Definition, Delete, Emphasis, FootnoteDefinition, FootnoteReference, Heading, Image, InlineCode, Link, List, Root, Strong, Table, ThematicBreak } from "mdast";
 import type { Plugin } from "unified";
 
+export interface CodeHighlightToken {
+  /** Absolute offset in the source markdown (beginning of the highlighted span). */
+  from: number;
+  /** Absolute offset at end (exclusive). */
+  to: number;
+  /** Space-separated hljs class list, e.g. "hljs-keyword" or "hljs-string hljs-regexp". */
+  className: string;
+}
+
+export interface ParseResult {
+  ast: Root;
+  /** Pre-computed syntax-highlight spans for fenced code blocks. */
+  codeTokens?: CodeHighlightToken[];
+}
+
 export interface ParserLike {
   parse(markdown: string): Root;
+  /**
+   * Optional async parser — when provided, live-preview offloads parsing +
+   * code-block highlighting to this (typically a Web Worker). The sync
+   * `parse` remains as a fallback path (used while the worker is warming up
+   * or for out-of-band callers like exportHTML).
+   */
+  parseAsync?(markdown: string): Promise<ParseResult>;
 }
 
 export type LivePreviewNode =
@@ -104,7 +126,14 @@ export interface EditorAPI {
   getSlashCommands(): SlashCommandDef[];
   uploadAsset(file: File): Promise<string | null>;
   setSelection(anchor: number, head?: number): void;
-  setDocument(next: string): void;
+  /**
+   * Replace the document content.
+   *
+   * @param opts.silent  When true, skip the onChange pipeline. Use when
+   *   loading a file from disk — avoids treating a file-open as a user
+   *   edit (no redundant mdast parse / link-index rebuild).
+   */
+  setDocument(next: string, opts?: { silent?: boolean }): void;
   replaceSelection(text: string): void;
   undo(): boolean;
   redo(): boolean;

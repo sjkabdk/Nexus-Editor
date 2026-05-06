@@ -2,6 +2,7 @@ import type { SelectionRange } from "@codemirror/state";
 import type { Content, Parent, Root } from "mdast";
 
 import type { LivePreviewNode } from "./types";
+import { scanWikiLinks } from "./wikilinks";
 
 export interface LivePreviewRange {
   from: number;
@@ -93,24 +94,41 @@ function collectImageRanges(
   return ranges;
 }
 
+function isInsideWikiLink(from: number, to: number, wikiLinkSpans: readonly [number, number][]): boolean {
+  return wikiLinkSpans.some(([wikiFrom, wikiTo]) => from >= wikiFrom && to <= wikiTo);
+}
+
+function shouldSkipInsideWikiLink(node: Content, from: number, to: number, wikiLinkSpans: readonly [number, number][]): boolean {
+  return (
+    isInsideWikiLink(from, to, wikiLinkSpans) &&
+    node.type !== "heading" &&
+    node.type !== "table" &&
+    node.type !== "list" &&
+    node.type !== "code"
+  );
+}
+
 function visit(
   node: Parent | Root,
   doc: string,
   selection: readonly SelectionRange[],
-  ranges: LivePreviewRange[]
+  ranges: LivePreviewRange[],
+  wikiLinkSpans: readonly [number, number][]
 ): void {
   for (const child of node.children) {
     const from = child.position?.start.offset;
     const to = child.position?.end.offset;
 
     if (typeof from === "number" && typeof to === "number" && isLivePreviewNode(child)) {
+      if (shouldSkipInsideWikiLink(child, from, to, wikiLinkSpans)) continue;
+
       if (child.type === "heading" || child.type === "table" || child.type === "list" || child.type === "code" || child.type === "definition") {
         // Always emitted regardless of cursor position.
         // buildDecorations decides decoration treatment based on cursor.
         ranges.push({ from, to, node: child, source: doc.slice(from, to) });
 
         if ("children" in child && Array.isArray(child.children)) {
-          visit(child, doc, selection, ranges);
+          visit(child, doc, selection, ranges, wikiLinkSpans);
         }
         continue;
       }
@@ -121,13 +139,13 @@ function visit(
       // with color changes — so the heightmap stays perfectly stable.
       ranges.push({ from, to, node: child, source: doc.slice(from, to) });
       if ("children" in child && Array.isArray(child.children)) {
-        visit(child as Parent, doc, selection, ranges);
+        visit(child as Parent, doc, selection, ranges, wikiLinkSpans);
       }
       continue;
     }
 
     if ("children" in child && Array.isArray(child.children)) {
-      visit(child, doc, selection, ranges);
+      visit(child, doc, selection, ranges, wikiLinkSpans);
     }
   }
 }
@@ -138,8 +156,9 @@ export function collectLivePreviewRanges(
   selection: readonly SelectionRange[]
 ): LivePreviewRange[] {
   const ranges: LivePreviewRange[] = [];
+  const wikiLinkSpans = scanWikiLinks(doc).map((link) => [link.from, link.to] as [number, number]);
 
-  visit(ast, doc, selection, ranges);
+  visit(ast, doc, selection, ranges, wikiLinkSpans);
   ranges.push(...collectImageRanges(doc, selection));
 
   return ranges.sort((left, right) => left.from - right.from);

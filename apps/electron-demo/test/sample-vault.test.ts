@@ -116,6 +116,15 @@ describe("sample-vault fixture — end-to-end wiki-link behavior", () => {
     expect(sources).toContain("Daily/2026-04-20.md");
   });
 
+  it("Testing.md shows linked backlinks from its sample-vault references", async () => {
+    const idx = await buildIndex();
+    const testingPath = path.join(VAULT_ROOT, "Topics/Testing.md");
+    const linked = idx.getBacklinks(testingPath).map((m) => path.relative(VAULT_ROOT, m.sourcePath));
+    expect(linked).toContain("Daily/2026-04-20.md");
+    expect(linked).toContain("Projects/Nexus-Editor.md");
+    expect(linked).toContain("index.md");
+  });
+
   it("Bob.md has an unlinked mention in Alice.md (plain text 'Bob' outside brackets)", async () => {
     const idx = await buildIndex();
     const bob = path.join(VAULT_ROOT, "People/Bob.md");

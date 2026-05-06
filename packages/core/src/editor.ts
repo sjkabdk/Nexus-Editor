@@ -1,4 +1,9 @@
-import { EditorState } from "@codemirror/state";
+import { Annotation, EditorState } from "@codemirror/state";
+
+// Annotation attached to dispatches that load content programmatically (e.g.
+// setDocument from file open) so updateListener can skip the user-edit path —
+// no onChange emission, no AST reparse for the onChange pipeline.
+const silentDocChange = Annotation.define<boolean>();
 import { EditorView, keymap, dropCursor, lineNumbers, type Direction } from "@codemirror/view";
 import { indentWithTab, undo as cmUndo, redo as cmRedo } from "@codemirror/commands";
 import { closeBrackets } from "@codemirror/autocomplete";
@@ -11,6 +16,8 @@ import { unified } from "unified";
 
 import { EventEmitter } from "./event-emitter";
 import { createLivePreviewExtension } from "./live-preview";
+import { createMarkdownLanguageSupport } from "./lezer-markdown";
+import { lezerStringToMdast, lezerTreeToMdast } from "./lezer-mdast-adapter";
 import { markdownFoldService } from "./markdown-fold";
 import { resolveLocale } from "./locale";
 import { markdownAutoPair } from "./markdown-autopair";
@@ -34,6 +41,25 @@ function parseDocument(parser: ParserLike, markdown: string): Root {
   } catch {
     return createEmptyAst();
   }
+}
+
+/**
+ * Build an mdast Root from the live editor state when one is available, or
+ * fall back to a headless Lezer parse of the doc string. Synchronous, no
+ * worker, no remark/micromark — uses the same incremental Lezer tree that
+ * powers live-preview decorations.
+ *
+ * `viewRef.current.state` is preferred because Lezer's parse is intrinsic to
+ * EditorState (incremental across edits); headless parsing is reserved for
+ * the initial `currentAst` value before the view is constructed.
+ */
+function lezerAstFromAnywhere(
+  viewRef: { current: EditorView | null },
+  fallbackMarkdown: string,
+): Root {
+  const view = viewRef.current;
+  if (view) return lezerTreeToMdast(view.state);
+  return lezerStringToMdast(fallbackMarkdown);
 }
 
 function markdownToHtml(markdown: string, plugins: NexusPlugin[]): string {
@@ -68,36 +94,90 @@ function extractToc(ast: Root): TocEntry[] {
 }
 
 function createParser(plugins: NexusPlugin[]): ParserLike {
+  // Build the unified pipeline ONCE, not per-parse call. Each
+  // `unified().use(...)` chain resolves plugin graphs, initializes extensions,
+  // and freezes the processor — measured at ~100ms on a packaged build even
+  // for empty input. Doing it on every parse meant file-open, every keystroke
+  // (pre-debounce), and every live-preview rebuild paid this cost.
+  const processor = unified().use(remarkParse);
+  for (const plugin of plugins) {
+    for (const remarkPlugin of plugin.remarkPlugins ?? []) {
+      processor.use(remarkPlugin);
+    }
+  }
+  processor.freeze();
+
   return {
     parse(markdown) {
-      const processor = unified().use(remarkParse);
-
-      for (const plugin of plugins) {
-        for (const remarkPlugin of plugin.remarkPlugins ?? []) {
-          processor.use(remarkPlugin);
-        }
-      }
-
       const tree = processor.parse(markdown);
       return processor.runSync(tree) as Root;
     }
   };
 }
 
+/**
+ * Transform-only processor: runs the user's remark transformer plugins
+ * against an already-parsed mdast Root (one produced by the Lezer adapter).
+ * No remark-parse, so the cost is whatever the user plugins cost — and it's
+ * a no-op when no plugins are attached.
+ */
+function createTransformProcessor(plugins: NexusPlugin[]): { runSync(tree: Root): Root } | null {
+  let attached = 0;
+  const processor = unified();
+  for (const plugin of plugins) {
+    for (const remarkPlugin of plugin.remarkPlugins ?? []) {
+      processor.use(remarkPlugin);
+      attached++;
+    }
+  }
+  if (attached === 0) return null;
+  processor.freeze();
+  return { runSync: (tree) => processor.runSync(tree) as Root };
+}
+
 export function createEditor(config: EditorConfig): EditorAPI {
   const plugins = config.plugins ?? [];
-  const parser = config.parser ?? createParser(plugins);
+  // `parser` is retained as an optional escape hatch for tests / consumers
+  // that pass a custom mdast pipeline. It is NO LONGER on the editor's hot
+  // path — the default code path uses lezerAstFromAnywhere which runs a
+  // synchronous Lezer parse against the live EditorState. Custom parsers
+  // (when provided) win, so existing test contracts that swap in mock
+  // parsers stay green.
+  const customParser = config.parser;
   const shortcuts = plugins.flatMap((plugin) => plugin.shortcuts ?? []);
   const slashCommands = plugins.flatMap((plugin) => plugin.slashCommands ?? []);
   const cmExtensions = plugins.flatMap((plugin) => plugin.cmExtensions ?? []);
   const widgetDefs = plugins.flatMap((plugin) => plugin.widgets ?? []);
+
+  // The sync remark parser is only needed for the legacy WidgetDefinition
+  // extension. Live preview, getAst(), table-of-contents, and normal change
+  // events all use the Lezer path below, so avoid paying this startup cost in
+  // the common no-widget case (including the Electron demo).
+  const fallbackParser = !customParser && widgetDefs.length > 0 ? createParser(plugins) : null;
+  const widgetParser: ParserLike | null = customParser ?? fallbackParser;
+  // Built only when the user passes remarkPlugins AND no custom parser.
+  // Custom-parser callers run their plugins inside `parser.parse`, so the
+  // transform pass would double-apply.
+  const hasRemarkPlugins = plugins.some((plugin) => (plugin.remarkPlugins?.length ?? 0) > 0);
+  const transformProcessor = !customParser && hasRemarkPlugins ? createTransformProcessor(plugins) : null;
+  const transformAst = (ast: Root): Root =>
+    transformProcessor ? transformProcessor.runSync(ast) : ast;
   const locale = resolveLocale(config.locale);
   const parseDelayMs = config.parseDelayMs ?? 0;
   const emitter = new EventEmitter<EditorEventMap>();
   let destroyed = false;
   let focused = false;
   let parseTimer: ReturnType<typeof setTimeout> | undefined;
-  let currentAst = parseDocument(parser, config.initialValue ?? "");
+  // Initial AST: when a custom parser is provided, honour it (tests rely on
+  // this — they install plugins that mutate the tree). Otherwise use the
+  // Lezer string parser, which is dramatically faster than remark and
+  // produces a structurally compatible mdast Root.
+  let currentAst = customParser
+    ? parseDocument(customParser, config.initialValue ?? "")
+    : transformAst(lezerStringToMdast(config.initialValue ?? ""));
+  // Forward ref so emitChange/setDocument can run lezerTreeToMdast against
+  // the live EditorState once the view is constructed.
+  const viewRef: { current: EditorView | null } = { current: null };
   let api!: EditorAPI;
 
   function setFocused(next: boolean) {
@@ -122,7 +202,20 @@ export function createEditor(config: EditorConfig): EditorAPI {
       return;
     }
 
-    currentAst = parseDocument(parser, markdown);
+    // Custom parser path: respected for tests / consumers that pass their own
+    // mdast pipeline (e.g. with bespoke remark plugins).
+    if (customParser) {
+      currentAst = parseDocument(customParser, markdown);
+      config.onChange?.(markdown, currentAst);
+      emitter.emit("change", markdown, currentAst);
+      return;
+    }
+
+    // Default path: Lezer-driven, synchronous, no worker. We read the live
+    // EditorState via viewRef so we get the incremental Lezer tree (cheap
+    // even on large docs). Falls back to a headless parse pre-view.
+    // User remark transformer plugins (if any) run via transformAst.
+    currentAst = transformAst(lezerAstFromAnywhere(viewRef, markdown));
     config.onChange?.(markdown, currentAst);
     emitter.emit("change", markdown, currentAst);
   }
@@ -182,7 +275,13 @@ export function createEditor(config: EditorConfig): EditorAPI {
         }),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
-            scheduleChange(update.state.doc.toString());
+            // Skip onChange/onParse work for transactions explicitly flagged as
+            // "silent" (e.g. setDocument({ silent: true }) used when loading a
+            // file from disk — that's not a user edit).
+            const silent = update.transactions.some((t) => t.annotation(silentDocChange) === true);
+            if (!silent) {
+              scheduleChange(update.state.doc.toString());
+            }
           }
 
           if ((update.selectionSet || update.docChanged) && !destroyed) {
@@ -210,6 +309,13 @@ export function createEditor(config: EditorConfig): EditorAPI {
             }
           }
         }),
+        // Lezer-based markdown language support. Drives `syntaxTree(state)` and
+        // gives us an incremental, viewport-aware parse tree intrinsic to the
+        // editor state. Step 1 of the lezer-migration: the tree is available
+        // but the existing mdast pipeline still feeds buildDecorations; later
+        // steps will switch the decoration handlers over to read from this
+        // tree and remove the mdast worker round-trip.
+        createMarkdownLanguageSupport(),
         lineNumbers(),
         themeExt.extension,
         tabSizeExt,
@@ -257,13 +363,17 @@ export function createEditor(config: EditorConfig): EditorAPI {
             return true;
           },
         }),
-        ...createLivePreviewExtension(parser, config.livePreview, { addColumn: locale.addColumn, addRow: locale.addRow }),
-        ...createWidgetExtension(parser, widgetDefs),
+        ...createLivePreviewExtension(config.livePreview, { addColumn: locale.addColumn, addRow: locale.addRow }),
+        ...(widgetParser ? createWidgetExtension(widgetParser, widgetDefs) : []),
         ...shortcutExtensions,
         ...cmExtensions
       ]
     })
   });
+
+  // Hand the view to lezerAstFromAnywhere consumers so getAst() / emitChange
+  // / silent setDocument can read the live incremental Lezer tree.
+  viewRef.current = view;
 
   api = {
     getDocument() {
@@ -306,18 +416,32 @@ export function createEditor(config: EditorConfig): EditorAPI {
         scrollIntoView: true
       });
     },
-    setDocument(next) {
+    setDocument(next, opts) {
       if (destroyed) {
         return;
       }
 
+      const silent = opts?.silent === true;
       view.dispatch({
         changes: {
           from: 0,
           to: view.state.doc.length,
           insert: next
-        }
+        },
+        annotations: silent ? silentDocChange.of(true) : undefined,
       });
+
+      // In silent mode we still keep currentAst in sync so getAst() /
+      // getTableOfContents() reflect the loaded file. Default path is the
+      // Lezer adapter against the freshly dispatched state — synchronous and
+      // negligible cost. Custom-parser callers (tests) keep their semantics.
+      if (silent) {
+        if (customParser) {
+          currentAst = parseDocument(customParser, next);
+        } else {
+          currentAst = transformAst(lezerAstFromAnywhere(viewRef, next));
+        }
+      }
     },
     replaceSelection(text) {
       if (destroyed) return;

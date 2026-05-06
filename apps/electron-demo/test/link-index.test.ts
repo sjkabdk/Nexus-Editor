@@ -281,7 +281,7 @@ describe("LinkIndex.getUnlinkedMentions", () => {
 });
 
 describe("LinkIndex.subscribe", () => {
-  it("fires listeners on rebuild and updateFile", () => {
+  it("fires listeners on rebuild and updateFile", async () => {
     const idx = new LinkIndex();
     let count = 0;
     idx.subscribe(() => {
@@ -290,6 +290,11 @@ describe("LinkIndex.subscribe", () => {
     idx.rebuild([{ path: "/v/a.md", content: "" }]);
     idx.updateFile("/v/a.md", "[[X]]");
     idx.removeFile("/v/a.md");
-    expect(count).toBe(3);
+    // Notifications are rAF-coalesced to avoid redundant subscriber re-renders
+    // under keystroke bursts; rapid successive mutations collapse into a
+    // single tick. Wait for rAF to flush.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(count).toBeGreaterThanOrEqual(1);
+    expect(count).toBeLessThanOrEqual(3);
   });
 });

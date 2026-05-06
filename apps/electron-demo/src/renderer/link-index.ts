@@ -1,5 +1,19 @@
 import { scanWikiLinks, type WikiLinkMatch } from "@nexus/core";
 
+/** Prefer requestIdleCallback for yielding; fall back to a macrotask otherwise. */
+function yieldToIdle(): Promise<void> {
+  return new Promise((resolve) => {
+    const ric: ((cb: () => void, opts?: { timeout: number }) => number) | undefined = (
+      globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }
+    ).requestIdleCallback;
+    if (typeof ric === "function") {
+      ric(() => resolve(), { timeout: 50 });
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
 export interface BacklinkHit {
   sourcePath: string;
   target: string;
@@ -9,6 +23,18 @@ export interface BacklinkHit {
 }
 
 export type LinkIndexListener = () => void;
+
+interface IndexSnapshot {
+  forward: Map<string, WikiLinkMatch[]>;
+  backward: Map<string, BacklinkHit[]>;
+  contents: Map<string, string>;
+  byBasename: Map<string, Set<string>>;
+}
+
+interface RebuildAsyncOptions {
+  onProgress?: (done: number, total: number) => void;
+  isCancelled?: () => boolean;
+}
 
 function basename(p: string): string {
   const norm = p.replace(/\\/g, "/");
@@ -144,42 +170,89 @@ export class LinkIndex {
   private contents = new Map<string, string>();
   /** basename (without extension, lowercase) → set of absolute paths. */
   private byBasename = new Map<string, Set<string>>();
+  /** Memoized unlinked-mentions result per target; invalidated on any
+   * contents/forward mutation. */
+  private unlinkedCache = new Map<string, BacklinkHit[]>();
 
   private listeners = new Set<LinkIndexListener>();
 
+  private invalidateUnlinkedCache(): void {
+    if (this.unlinkedCache.size > 0) this.unlinkedCache.clear();
+  }
+
   /** Replace the entire index with `files`. */
   rebuild(files: Array<{ path: string; content: string }>): void {
-    this.forward.clear();
-    this.backward.clear();
-    this.contents.clear();
-    this.byBasename.clear();
+    const next = this.createEmptySnapshot();
     for (const f of files) {
-      this.indexFile(f.path, f.content);
+      this.indexFileInto(next, f.path, f.content);
     }
-    this.rebuildBackward();
+    this.rebuildBackwardInto(next);
+    this.commitSnapshot(next);
     this.notify();
+  }
+
+  /**
+   * Async chunked rebuild — yields to the event loop every `CHUNK` files so the
+   * UI thread stays responsive on large vaults. `notify()` fires once at the
+   * end; callers that want progressive updates can pass `onProgress`.
+   *
+   * The rebuild happens against temporary maps and commits atomically at the
+   * end. If a newer seed supersedes this run, `isCancelled` leaves the current
+   * index untouched instead of exposing a partially rebuilt graph.
+   */
+  async rebuildAsync(
+    files: Array<{ path: string; content: string }>,
+    options: RebuildAsyncOptions = {},
+  ): Promise<boolean> {
+    const next = this.createEmptySnapshot();
+    const CHUNK = 25;
+    for (let i = 0; i < files.length; i += CHUNK) {
+      if (options.isCancelled?.()) return false;
+      const end = Math.min(i + CHUNK, files.length);
+      for (let j = i; j < end; j++) {
+        const f = files[j];
+        this.indexFileInto(next, f.path, f.content);
+      }
+      options.onProgress?.(end, files.length);
+      // Yield to the event loop so paint / input events can interleave.
+      await yieldToIdle();
+    }
+    if (options.isCancelled?.()) return false;
+    this.rebuildBackwardInto(next);
+    if (options.isCancelled?.()) return false;
+    this.commitSnapshot(next);
+    this.notify();
+    return true;
   }
 
   /** Incremental update for a single file's contents. */
   updateFile(path: string, content: string): void {
     this.removeFromBasenames(path);
     this.indexFile(path, content);
-    this.rebuildBackward();
+    this.invalidateUnlinkedCache();
+    // Incremental reverse-index maintenance — only rewrites backward edges
+    // whose `sourcePath` is this file. O(|edges of this file|) instead of
+    // O(|total edges in the vault|). On keystroke-driven updates the previous
+    // behavior scaled with vault size; now it only scales with this file.
+    this.rebuildBackwardFor(normalizeSlashes(path));
     this.notify();
   }
 
   /** Drop a file and all its outgoing/incoming edges. */
   removeFile(path: string): void {
     this.removeFromBasenames(path);
-    this.forward.delete(path);
-    this.contents.delete(path);
-    this.rebuildBackward();
+    const norm = normalizeSlashes(path);
+    this.forward.delete(norm);
+    this.contents.delete(norm);
+    this.invalidateUnlinkedCache();
+    // Only purge edges whose sourcePath is this file.
+    this.removeBackwardEdgesFrom(norm);
     this.notify();
   }
 
   /** Rename `oldPath` → `newPath`, preserving content. */
   renameFile(oldPath: string, newPath: string): void {
-    const content = this.contents.get(oldPath);
+    const content = this.contents.get(normalizeSlashes(oldPath));
     if (content == null) return;
     this.removeFile(oldPath);
     this.updateFile(newPath, content);
@@ -208,11 +281,23 @@ export class LinkIndex {
    * inside an existing wiki link. Case-insensitive, word-boundary matched.
    *
    * Corresponds to Obsidian's "Unlinked mentions" section.
+   *
+   * Result is cached per `targetPath` and invalidated on any forward/contents
+   * change (see `indexFile` / `removeFromBasenames` / `updateFile`). This is
+   * the hottest O(vault) path — before caching it ran on every
+   * backlinks-panel refresh, including every keystroke's debounced
+   * updateFile → notify → refresh chain.
    */
   getUnlinkedMentions(targetPath: string): BacklinkHit[] {
     const norm = normalizeSlashes(targetPath);
+    const cached = this.unlinkedCache.get(norm);
+    if (cached) return cached;
+
     const needle = stripExt(basename(norm));
-    if (!needle) return [];
+    if (!needle) {
+      this.unlinkedCache.set(norm, []);
+      return [];
+    }
     const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(`\\b${escaped}\\b`, "gi");
 
@@ -237,6 +322,7 @@ export class LinkIndex {
         });
       }
     }
+    this.unlinkedCache.set(norm, out);
     return out;
   }
 
@@ -251,6 +337,15 @@ export class LinkIndex {
    * unique basename. Returns null when no candidate fits.
    */
   resolve(name: string, fromPath: string | null | undefined): string | null {
+    return this.resolveFromMaps(name, fromPath, this.contents, this.byBasename);
+  }
+
+  private resolveFromMaps(
+    name: string,
+    fromPath: string | null | undefined,
+    contents: Map<string, string>,
+    byBasename: Map<string, Set<string>>,
+  ): string | null {
     if (!name) return null;
     // Strip Obsidian anchors — `#heading` and `^blockid` are navigation hints,
     // not part of the file identity. v1 resolves to the underlying file; v2
@@ -260,7 +355,7 @@ export class LinkIndex {
     if (!bare) return null;
     name = bare;
     const normFrom = fromPath ? normalizeSlashes(fromPath) : null;
-    const candidates = this.contents;
+    const candidates = contents;
 
     // Rule 1 — exact absolute path.
     if (candidates.has(name)) return name;
@@ -280,7 +375,7 @@ export class LinkIndex {
     if (normFrom) {
       const dir = dirname(normFrom);
       const bn = stripExt(basename(normName)).toLowerCase();
-      const bucket = this.byBasename.get(bn);
+      const bucket = byBasename.get(bn);
       if (bucket) {
         for (const abs of bucket) {
           if (dirname(abs).toLowerCase() === dir.toLowerCase()) return abs;
@@ -290,7 +385,7 @@ export class LinkIndex {
 
     // Rule 4 — globally unique basename.
     const bn = stripExt(basename(normName)).toLowerCase();
-    const bucket = this.byBasename.get(bn);
+    const bucket = byBasename.get(bn);
     if (bucket && bucket.size === 1) {
       return [...bucket][0];
     }
@@ -305,7 +400,54 @@ export class LinkIndex {
     };
   }
 
+  private createEmptySnapshot(): IndexSnapshot {
+    return {
+      forward: new Map(),
+      backward: new Map(),
+      contents: new Map(),
+      byBasename: new Map(),
+    };
+  }
+
+  private currentSnapshot(): IndexSnapshot {
+    return {
+      forward: this.forward,
+      backward: this.backward,
+      contents: this.contents,
+      byBasename: this.byBasename,
+    };
+  }
+
+  private commitSnapshot(next: IndexSnapshot): void {
+    this.forward = next.forward;
+    this.backward = next.backward;
+    this.contents = next.contents;
+    this.byBasename = next.byBasename;
+    this.invalidateUnlinkedCache();
+  }
+
+  private notifyHandle: number | null = null;
+
+  /**
+   * Coalesce rapid notifications into a single rAF tick. Without this,
+   * keystroke-driven updateFile calls would re-run every subscriber
+   * (backlinks, suggestions, etc.) synchronously on every change — the
+   * backlinks panel refresh then does heavy O(vault) work like
+   * getUnlinkedMentions.
+   */
   private notify(): void {
+    if (this.notifyHandle != null) return;
+    const raf: ((cb: () => void) => number) | undefined = (
+      globalThis as { requestAnimationFrame?: (cb: () => void) => number }
+    ).requestAnimationFrame;
+    const schedule = raf ? (cb: () => void) => raf(cb) : (cb: () => void) => setTimeout(cb, 0) as unknown as number;
+    this.notifyHandle = schedule(() => {
+      this.notifyHandle = null;
+      this.notifyNow();
+    });
+  }
+
+  private notifyNow(): void {
     for (const l of [...this.listeners]) {
       try {
         l();
@@ -316,15 +458,19 @@ export class LinkIndex {
   }
 
   private indexFile(rawPath: string, content: string): void {
+    this.indexFileInto(this.currentSnapshot(), rawPath, content);
+  }
+
+  private indexFileInto(snapshot: IndexSnapshot, rawPath: string, content: string): void {
     const path = normalizeSlashes(rawPath);
     const matches = scanWikiLinks(content);
-    this.forward.set(path, matches);
-    this.contents.set(path, content);
+    snapshot.forward.set(path, matches);
+    snapshot.contents.set(path, content);
     const bn = stripExt(basename(path)).toLowerCase();
-    let bucket = this.byBasename.get(bn);
+    let bucket = snapshot.byBasename.get(bn);
     if (!bucket) {
       bucket = new Set();
-      this.byBasename.set(bn, bucket);
+      snapshot.byBasename.set(bn, bucket);
     }
     bucket.add(path);
   }
@@ -341,29 +487,63 @@ export class LinkIndex {
 
   /**
    * Rebuild the backward map from scratch. O(E) where E is total outgoing
-   * edges — cheap enough for interactive editing and dramatically simpler
-   * than maintaining differential invariants.
+   * edges — used only by full `rebuild*` paths.
    */
   private rebuildBackward(): void {
-    this.backward.clear();
-    for (const [source, matches] of this.forward) {
-      const content = this.contents.get(source) ?? "";
-      for (const m of matches) {
-        const target = this.resolve(m.target, source);
-        if (!target) continue;
-        let bucket = this.backward.get(target);
-        if (!bucket) {
-          bucket = [];
-          this.backward.set(target, bucket);
-        }
-        bucket.push({
-          sourcePath: source,
-          target: m.target,
-          from: m.from,
-          to: m.to,
-          snippet: snippetAround(content, m.from, m.to),
-        });
+    this.rebuildBackwardInto(this.currentSnapshot());
+  }
+
+  private rebuildBackwardInto(snapshot: IndexSnapshot): void {
+    snapshot.backward.clear();
+    for (const source of snapshot.forward.keys()) {
+      this.addBackwardEdgesFromInto(snapshot, source);
+    }
+  }
+
+  /**
+   * Incremental: drop all backward edges originating from `source` and
+   * re-emit them from the current `forward[source]`. Keeps per-keystroke
+   * updates proportional to this file's link count.
+   */
+  private rebuildBackwardFor(source: string): void {
+    this.removeBackwardEdgesFrom(source);
+    this.addBackwardEdgesFrom(source);
+  }
+
+  private removeBackwardEdgesFrom(source: string): void {
+    for (const [target, bucket] of this.backward) {
+      const kept = bucket.filter((h) => h.sourcePath !== source);
+      if (kept.length === 0) {
+        this.backward.delete(target);
+      } else if (kept.length !== bucket.length) {
+        this.backward.set(target, kept);
       }
+    }
+  }
+
+  private addBackwardEdgesFrom(source: string): void {
+    this.addBackwardEdgesFromInto(this.currentSnapshot(), source);
+  }
+
+  private addBackwardEdgesFromInto(snapshot: IndexSnapshot, source: string): void {
+    const matches = snapshot.forward.get(source);
+    if (!matches) return;
+    const content = snapshot.contents.get(source) ?? "";
+    for (const m of matches) {
+      const target = this.resolveFromMaps(m.target, source, snapshot.contents, snapshot.byBasename);
+      if (!target) continue;
+      let bucket = snapshot.backward.get(target);
+      if (!bucket) {
+        bucket = [];
+        snapshot.backward.set(target, bucket);
+      }
+      bucket.push({
+        sourcePath: source,
+        target: m.target,
+        from: m.from,
+        to: m.to,
+        snippet: snippetAround(content, m.from, m.to),
+      });
     }
   }
 }

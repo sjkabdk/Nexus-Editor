@@ -18,7 +18,7 @@ describe("createEditorShell", () => {
     shell.destroy();
   });
 
-  it("marks state dirty when the editor content changes", () => {
+  it("marks state dirty when the editor content changes", async () => {
     const container = document.createElement("div");
     const state = createState();
     const onChange = vi.fn();
@@ -30,6 +30,8 @@ describe("createEditorShell", () => {
     });
 
     shell.editor.setDocument("new content");
+    // onChange is debounced (parseDelayMs 150); give it a moment to fire.
+    await new Promise((r) => setTimeout(r, 200));
 
     expect(state.dirty).toBe(true);
     expect(state.content).toBe("new content");
@@ -37,7 +39,7 @@ describe("createEditorShell", () => {
     shell.destroy();
   });
 
-  it("resets dirty flag when loadDocument is called", () => {
+  it("resets dirty flag when loadDocument is called", async () => {
     const container = document.createElement("div");
     const state = createState();
     const shell = createEditorShell({
@@ -48,6 +50,7 @@ describe("createEditorShell", () => {
     });
 
     shell.editor.setDocument("edited");
+    await new Promise((r) => setTimeout(r, 200));
     expect(state.dirty).toBe(true);
 
     shell.loadDocument("loaded from file");

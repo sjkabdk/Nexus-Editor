@@ -71,3 +71,31 @@ body,
   border-top: 1px solid #eee;
   flex-shrink: 0;
 }
+
+/* Syntax highlighting for fenced code blocks.
+   Tokens produced by the parser worker use hljs-* class names, mapped here
+   to a minimal colour palette. */
+.cm-editor .hljs-keyword,
+.cm-editor .hljs-selector-tag,
+.cm-editor .hljs-built_in,
+.cm-editor .hljs-name,
+.cm-editor .hljs-doctag { color: #d33682; }
+.cm-editor .hljs-string,
+.cm-editor .hljs-attr,
+.cm-editor .hljs-symbol,
+.cm-editor .hljs-bullet,
+.cm-editor .hljs-addition,
+.cm-editor .hljs-regexp,
+.cm-editor .hljs-link { color: #2aa198; }
+.cm-editor .hljs-title,
+.cm-editor .hljs-section { color: #268bd2; }
+.cm-editor .hljs-comment,
+.cm-editor .hljs-quote,
+.cm-editor .hljs-meta { color: #93a1a1; font-style: italic; }
+.cm-editor .hljs-number,
+.cm-editor .hljs-literal { color: #b58900; }
+.cm-editor .hljs-type,
+.cm-editor .hljs-params { color: #859900; }
+.cm-editor .hljs-deletion { color: #dc322f; }
+.cm-editor .hljs-variable,
+.cm-editor .hljs-template-variable { color: #cb4b16; }

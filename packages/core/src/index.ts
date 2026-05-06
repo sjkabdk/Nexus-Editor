@@ -13,6 +13,7 @@ export {
   type WikiLinkNavigateOptions,
 } from "./wikilinks";
 export type {
+  CodeHighlightToken,
   EditorAPI,
   EditorConfig,
   EditorEventMap,
@@ -23,9 +24,10 @@ export type {
   LivePreviewRenderContext,
   LivePreviewRenderer,
   NexusPlugin,
+  ParseResult,
+  ParserLike,
   SlashCommandDef,
   SlashMenuState,
-  ParserLike,
   TocEntry,
   WidgetDefinition
 } from "./types";

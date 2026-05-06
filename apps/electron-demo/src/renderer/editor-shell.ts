@@ -101,9 +101,20 @@ export function createEditorShell(options: EditorShellOptions): EditorShell {
     suggest: suggestWikilinks ? (q) => suggestWikilinks(q) : undefined,
   });
 
+  // No more parser worker. Live-preview drives off `syntaxTree(state)` from
+  // @codemirror/lang-markdown (incremental, intrinsic to EditorState), and
+  // editor.ts builds mdast for `getAst()` / `change` events synchronously
+  // via the Lezer→mdast adapter — no off-thread parse, no remark/micromark
+  // hot path.
+
   const editor = createEditor({
     container,
     initialValue: state.content,
+    // Debounce the onChange pipeline — each keystroke would otherwise trigger
+    // a full mdast walk AND linkIndex.updateFile (which rebuilds all reverse
+    // edges across the vault). 150ms is imperceptible for typing UX but
+    // batches bursts of keystrokes into one parse.
+    parseDelayMs: 150,
     plugins: [
       createGfmPreset(),
       createHistoryPlugin(),
@@ -309,10 +320,22 @@ export function createEditorShell(options: EditorShellOptions): EditorShell {
       editor.setTheme(settingsToTheme(next));
     },
     loadDocument(content: string) {
-      editor.setDocument(content);
+      // Load from disk is NOT a user edit — use silent mode to skip the
+      // onChange pipeline (avoids redundant parse + link-index rebuild on
+      // every file open). Caller owns state.content / dirty below and the
+      // link index is re-seeded as part of vault open.
+      const t0 = performance.now();
+      editor.setDocument(content, { silent: true });
+      const t1 = performance.now();
       state.content = content;
       state.dirty = false;
       onStateChange();
+      // Surfaced here because editor.setDocument triggers the whole CM6
+      // decoration rebuild chain (live-preview buildDecorations), so this
+      // number is the practical "time to render the opened file".
+      // eslint-disable-next-line no-console
+      console.log("%c[perf]", "color:#0aa;font-weight:bold", "editor.setDocument",
+        `${(t1 - t0).toFixed(1)}ms`, { bytes: content.length });
     },
     destroy() {
       toolbar.destroy();

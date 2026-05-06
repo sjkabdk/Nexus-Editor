@@ -40,3 +40,10 @@ interface DemoBridge {
 interface Window {
   nexusDemo: DemoBridge;
 }
+
+declare module "*?worker" {
+  const WorkerCtor: {
+    new (options?: { name?: string }): Worker;
+  };
+  export default WorkerCtor;
+}
