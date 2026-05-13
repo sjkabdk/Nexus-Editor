@@ -26,7 +26,8 @@ This document maps every planned feature to **package ownership / priority / sta
 | 15 | Regex search | `plugin-search` | P1 | planned | No | Watch escape edge cases |
 | 16 | Command / search history | `plugin-search` + `plugin-slash` | P2 | planned | Yes | Needs persistence (localStorage or host-injected) |
 | 17 | Fuzzy search | `plugin-search` | P2 | planned | No | Evaluate fzf-like algorithm vs. third-party lib |
-| 3  | Slash command sorting + limit | `plugin-slash` | P0 | planned | No | Public API addition |
+| 3  | Slash command sorting + limit | `plugin-slash` | P0 | done | Yes | Landed alongside the floating menu UI — see `openspec/changes/add-slash-menu-ui` |
+| 27 | Slash command floating menu UI | `plugin-slash` + `electron-demo` | P0 | done | Yes | `createSlashMenuUI(editor, options)` — see `openspec/changes/add-slash-menu-ui` |
 
 ## 3. Core Editor
 
