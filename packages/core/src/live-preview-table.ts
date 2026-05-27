@@ -1,4 +1,4 @@
-import { EditorView, WidgetType } from "@codemirror/view";
+import { EditorView, WidgetType, runScopeHandlers } from "@codemirror/view";
 import type { Table } from "mdast";
 
 import type { LivePreviewLabels } from "./types";
@@ -1131,6 +1131,26 @@ export class EditableTableWidget extends WidgetType {
             const idx = Array.from(all).indexOf(td);
             const next = e.shiftKey ? idx - 1 : idx + 1;
             if (next >= 0 && next < all.length) (all[next] as HTMLElement).focus({ preventScroll: true });
+            return;
+          }
+
+          // Forward editor-level shortcuts to CM6's keymap. The cell is
+          // contentEditable + the widget has `ignoreEvent: true`, so
+          // without this CM6 never sees the event and shortcuts like
+          // Mod-F (open search) silently fail inside table cells.
+          //
+          // Allow standard text-editing shortcuts (copy / paste / cut /
+          // select-all / undo / redo) to fall through to the browser's
+          // native contentEditable handling — they target the cell text,
+          // not the whole document.
+          const isMod = e.metaKey || e.ctrlKey;
+          if (!isMod) return;
+          const passthrough = new Set(["c", "v", "x", "a", "z", "y", "C", "V", "X", "A", "Z", "Y"]);
+          if (passthrough.has(e.key)) return;
+          const v = self.viewRef.current;
+          if (!v) return;
+          if (runScopeHandlers(v, e, "editor")) {
+            e.preventDefault();
           }
         });
 
